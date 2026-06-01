@@ -1,0 +1,348 @@
+#!/bin/bash
+# B站视频字幕智能获取脚本 v3.0
+# 功能：CC字幕 → AI字幕 → Whisper转录（三级降级）
+# 支持：WSL Chromium/Edge Cookie、多语言AI字幕、GPU加速
+# v3.0 新增：CUDA检测、智能模型选择、Cookie过期提醒、音频优化
+
+VIDEO_URL="$1"
+OUTPUT_DIR="${2:-$HOME/workspace/knowledge/bilibili}"
+mkdir -p "$OUTPUT_DIR"
+BROWSER_TYPE="${3:-chromium}"
+
+CLEANUP_DIR="$OUTPUT_DIR"
+cleanup_temp() {
+    rm -f "$CLEANUP_DIR"/bilibili_subtitle*.srt "$CLEANUP_DIR"/bilibili_ai_subtitle*.srt \
+          "$CLEANUP_DIR"/bilibili_audio*.mp3 "$CLEANUP_DIR"/bilibili_audio*.m4a \
+          "$CLEANUP_DIR"/bilibili_audio*.wav "$CLEANUP_DIR"/bilibili_audio*.txt
+}
+trap cleanup_temp EXIT
+
+if [ -z "$VIDEO_URL" ]; then
+    echo "用法: $0 <B站视频链接> [输出目录] [浏览器类型:chromium|edge|firefox]"
+    exit 1
+fi
+
+echo "🔍 正在获取视频信息..."
+
+# ===== 检测浏览器Cookie =====
+echo "🔍 检测浏览器Cookie..."
+
+COOKIE_ARGS=()
+
+detect_cookie() {
+    local browser="$1"
+    local path="$2"
+    local label="$3"
+    if [ -d "$path" ]; then
+        local test_out
+        test_out=$(yt-dlp --list-subs --cookies-from-browser "$browser:$path" "$VIDEO_URL" 2>&1 | head -1)
+        if echo "$test_out" | grep -q "Extracting"; then
+            echo "   ✅ 使用 $label Cookie"
+            COOKIE_ARGS=(--cookies-from-browser "$browser:$path")
+            return 0
+        fi
+    fi
+    return 1
+}
+
+case "$BROWSER_TYPE" in
+    chromium)
+        detect_cookie "chromium" "$HOME/snap/chromium/common/chromium" "WSL Chromium" || true
+        ;;
+    edge)
+        WIN_USER=$(ls /mnt/c/Users/ 2>/dev/null | grep -v "Public\|Default\|All Users" | head -1)
+        if [ -n "$WIN_USER" ]; then
+            detect_cookie "edge" "C:/Users/$WIN_USER/AppData/Local/Microsoft/Edge/User Data" "Windows Edge" || true
+        fi
+        ;;
+    firefox)
+        detect_cookie "firefox" "$HOME/snap/firefox/common/.mozilla/firefox" "WSL Firefox" || true
+        ;;
+esac
+
+if [ ${#COOKIE_ARGS[@]} -eq 0 ]; then
+    detect_cookie "chromium" "$HOME/snap/chromium/common/chromium" "WSL Chromium" || \
+    { WIN_USER=$(ls /mnt/c/Users/ 2>/dev/null | grep -v "Public\|Default\|All Users" | head -1); \
+      [ -n "$WIN_USER" ] && detect_cookie "edge" "C:/Users/$WIN_USER/AppData/Local/Microsoft/Edge/User Data" "Windows Edge"; } || \
+    detect_cookie "firefox" "$HOME/snap/firefox/common/.mozilla/firefox" "WSL Firefox" || true
+fi
+
+if [ ${#COOKIE_ARGS[@]} -eq 0 ]; then
+    echo "   ⚠️ 无可用Cookie，B站AI字幕可能无法获取"
+    echo "   💡 请先用 chromium-browser 登录 bilibili.com"
+else
+    COOKIE_AGE=$(ls -lu "$HOME/snap/chromium/common/chromium/Default/Cookies" 2>/dev/null | awk '{print $6, $7}')
+    echo "   ℹ️  Cookie最后使用: $COOKIE_AGE（约30天过期）"
+fi
+echo ""
+
+# ===== 获取视频元数据 =====
+VIDEO_INFO=$(yt-dlp "${COOKIE_ARGS[@]}" --dump-json "$VIDEO_URL" 2>/dev/null | head -1)
+
+if [ -z "$VIDEO_INFO" ]; then
+    VIDEO_INFO=$(yt-dlp --dump-json "$VIDEO_URL" 2>/dev/null | head -1)
+    if [ -z "$VIDEO_INFO" ]; then
+        echo "❌ 无法获取视频信息，请检查网络或链接是否正确"
+        exit 1
+    fi
+fi
+
+TITLE=$(echo "$VIDEO_INFO" | python3 -c "import sys, json; print(json.load(sys.stdin).get('title', '未知标题'))")
+AUTHOR=$(echo "$VIDEO_INFO" | python3 -c "import sys, json; print(json.load(sys.stdin).get('uploader', '未知作者'))")
+UPLOAD_DATE=$(echo "$VIDEO_INFO" | python3 -c "import sys, json; print(json.load(sys.stdin).get('upload_date', '未知时间'))")
+DURATION=$(echo "$VIDEO_INFO" | python3 -c "import sys, json; d=json.load(sys.stdin).get('duration', 0); print(f'{int(d//60)}分{int(d%60)}秒')")
+VIDEO_ID=$(echo "$VIDEO_INFO" | python3 -c "import sys, json; print(json.load(sys.stdin).get('id', ''))")
+DURATION_SEC=$(echo "$VIDEO_INFO" | python3 -c "import sys, json; print(json.load(sys.stdin).get('duration', 0))")
+
+if [ "$UPLOAD_DATE" != "未知时间" ]; then
+    UPLOAD_DATE_FORMATTED=$(echo "$UPLOAD_DATE" | sed 's/\(....\)\(..\)\(..\)/\1-\2-\3/')
+else
+    UPLOAD_DATE_FORMATTED="$UPLOAD_DATE"
+fi
+
+echo "📹 视频: $TITLE"
+echo "👤 作者: $AUTHOR"
+echo "📅 发布: $UPLOAD_DATE_FORMATTED"
+echo "⏱️  时长: $DURATION"
+
+# ===== 检查字幕 =====
+echo ""
+echo "🔍 正在检查字幕..."
+SUB_CHECK=$(yt-dlp "${COOKIE_ARGS[@]}" --list-subs "$VIDEO_URL" 2>&1)
+
+HAS_CC_SUBS=false
+CC_SUB_LANG=""
+CC_SUB_LANG=$(echo "$SUB_CHECK" | awk '!/danmaku/ && !/ai-/ && /^[[:space:]]*(zh-CN|zh-TW|zh-Hans|zh-Hant|en|ja|ko|es|ar|pt|de|fr)($|[-[:space:]])/ {print $1; exit}')
+if [ -n "$CC_SUB_LANG" ]; then
+    HAS_CC_SUBS=true
+fi
+
+HAS_AI_SUBS=false
+AI_LANG=""
+for lang in "ai-zh" "ai-en" "ai-ja" "ai-kr" "ai-th" "ai-id" "ai-vi"; do
+    if echo "$SUB_CHECK" | grep -q "$lang"; then
+        HAS_AI_SUBS=true
+        AI_LANG="$lang"
+        break
+    fi
+done
+
+TRANSCRIPT_SOURCE=""
+TRANSCRIPT_TEXT=""
+
+# 第1级：人工CC字幕
+if [ "$HAS_CC_SUBS" = true ]; then
+    echo "✅ 发现人工CC字幕（$CC_SUB_LANG），优先下载..."
+
+    yt-dlp "${COOKIE_ARGS[@]}" --skip-download --write-subs --sub-langs "$CC_SUB_LANG" --convert-subs srt \
+        -o "${OUTPUT_DIR}/bilibili_subtitle.%(ext)s" "$VIDEO_URL" 2>&1
+
+    SUB_FILE=$(find "$OUTPUT_DIR" -maxdepth 1 -name "bilibili_subtitle*.srt" -type f 2>/dev/null | head -1)
+
+    if [ -n "$SUB_FILE" ] && [ -s "$SUB_FILE" ]; then
+        echo "✅ CC字幕下载成功"
+        TRANSCRIPT_SOURCE="B站CC字幕"
+        TRANSCRIPT_TEXT=$(sed '/^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/d' "$SUB_FILE" | sed '/^[0-9]*$/d' | sed '/^$/d')
+    else
+        echo "⚠️  CC字幕下载失败..."
+        HAS_CC_SUBS=false
+    fi
+fi
+
+# 第2级：AI字幕
+if [ -z "$TRANSCRIPT_TEXT" ] && [ "$HAS_AI_SUBS" = true ]; then
+    echo "✅ 发现AI字幕（$AI_LANG），正在下载..."
+
+    yt-dlp "${COOKIE_ARGS[@]}" --skip-download --write-subs --write-auto-subs --sub-langs "$AI_LANG" --convert-subs srt \
+        -o "${OUTPUT_DIR}/bilibili_ai_subtitle.%(ext)s" "$VIDEO_URL" 2>&1
+
+    SUB_FILE=$(find "$OUTPUT_DIR" -maxdepth 1 -name "bilibili_ai_subtitle*.srt" -type f 2>/dev/null | head -1)
+
+    if [ -n "$SUB_FILE" ] && [ -s "$SUB_FILE" ]; then
+        echo "✅ AI字幕下载成功"
+        TRANSCRIPT_SOURCE="B站AI字幕 ($AI_LANG)"
+        TRANSCRIPT_TEXT=$(sed '/^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/d' "$SUB_FILE" | sed '/^[0-9]*$/d' | sed '/^$/d')
+    else
+        echo "⚠️  AI字幕下载失败..."
+        HAS_AI_SUBS=false
+    fi
+fi
+
+# 第3级：Whisper本地转录
+if [ -z "$TRANSCRIPT_TEXT" ]; then
+    # 兜底：尝试直接下载AI字幕（解决 yt-dlp 列表检测不到的 AI 字幕）
+    echo "🔍 尝试直接下载 AI 字幕（兜底）..."
+    for try_lang in "ai-zh" "ai-en" "ai-ja"; do
+        yt-dlp "${COOKIE_ARGS[@]}" --skip-download --write-subs --write-auto-subs --sub-langs "$try_lang" --convert-subs srt \
+            -o "${OUTPUT_DIR}/bilibili_ai_subtitle.%(ext)s" "$VIDEO_URL" 2>/dev/null
+        SUB_FILE=$(find "$OUTPUT_DIR" -maxdepth 1 -name "bilibili_ai_subtitle*.srt" -type f 2>/dev/null | head -1)
+        if [ -n "$SUB_FILE" ] && [ -s "$SUB_FILE" ]; then
+            echo "✅ 兜底成功！AI字幕已下载（$try_lang）"
+            TRANSCRIPT_SOURCE="B站AI字幕 ($try_lang)"
+            TRANSCRIPT_TEXT=$(sed '/^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/d' "$SUB_FILE" | sed '/^[0-9]*$/d' | sed '/^$/d')
+            break
+        fi
+    done
+fi
+
+if [ -z "$TRANSCRIPT_TEXT" ]; then
+    echo "🎤 未发现字幕，使用Whisper本地语音转文字..."
+    echo "⏳ 这可能需要一些时间，请耐心等待..."
+
+    # 检测CUDA可用性
+    HAS_CUDA=false
+    if python3 -c "import torch; print(torch.cuda.is_available())" 2>/dev/null | grep -q "True"; then
+        HAS_CUDA=true
+        echo "   ✅ GPU加速可用（CUDA）"
+        GPU_NAME=$(python3 -c "import torch; print(torch.cuda.get_device_name(0))" 2>/dev/null)
+        echo "   🎮 GPU: $GPU_NAME"
+    else
+        echo "   ⚠️ GPU不可用，使用CPU模式（速度较慢）"
+        echo "   💡 建议安装CUDA版torch: pip install torch --index-url https://download.pytorch.org/whl/cu118"
+    fi
+
+    # 根据视频时长选择Whisper模型
+    DURATION_INT=${DURATION_SEC%.*}
+    DURATION_INT=${DURATION_INT:-0}
+    WHISPER_MODEL="medium"
+    if [ "$HAS_CUDA" = false ]; then
+        if [ "$DURATION_INT" -lt 300 ]; then
+            WHISPER_MODEL="tiny"
+            echo "   📐 视频较短(<5分钟)+CPU模式 → 使用 tiny 模型（快速）"
+        elif [ "$DURATION_INT" -lt 600 ]; then
+            WHISPER_MODEL="base"
+            echo "   📐 视频中等(<10分钟)+CPU模式 → 使用 base 模型"
+        else
+            WHISPER_MODEL="small"
+            echo "   📐 视频较长(>10分钟)+CPU模式 → 使用 small 模型（平衡）"
+        fi
+    else
+        if [ "$DURATION_INT" -lt 180 ]; then
+            WHISPER_MODEL="tiny"
+            echo "   📐 短视频(<3分钟) → 使用 tiny 模型（快速）"
+        elif [ "$DURATION_INT" -lt 600 ]; then
+            WHISPER_MODEL="base"
+            echo "   📐 中等时长(<10分钟) → 使用 base 模型"
+        elif [ "$DURATION_INT" -lt 1800 ]; then
+            WHISPER_MODEL="medium"
+            echo "   📐 较长视频(10-30分钟) → 使用 medium 模型"
+        else
+            WHISPER_MODEL="medium"
+            echo "   📐 长视频(>30分钟) → 使用 medium 模型（如需 large-v3 请手动指定）"
+        fi
+    fi
+
+    # 检测视频语言（判断是否为中文内容）
+    WHISPER_LANG=""
+    TITLE_LOWER=$(echo "$TITLE" | python3 -c "import sys; print(sys.stdin.read().strip().lower())")
+    if echo "$TITLE_LOWER" | grep -qP '[\x{4e00}-\x{9fff}]'; then
+        WHISPER_LANG="zh"
+        echo "   🌐 检测到中文标题，指定 --language zh 提高准确率"
+    fi
+
+    # 下载音频
+    echo "   ⬇️ 下载音频..."
+    yt-dlp "${COOKIE_ARGS[@]}" -x --audio-format mp3 -o "${OUTPUT_DIR}/bilibili_audio.%(ext)s" "$VIDEO_URL" 2>&1 || \
+    yt-dlp -x --audio-format mp3 -o "${OUTPUT_DIR}/bilibili_audio.%(ext)s" "$VIDEO_URL" 2>&1
+
+    AUDIO_FILE=$(find "$OUTPUT_DIR" -maxdepth 1 \( -name "bilibili_audio*.mp3" -o -name "bilibili_audio*.m4a" \) 2>/dev/null | head -1)
+
+    if [ -z "$AUDIO_FILE" ]; then
+        echo "❌ 音频下载失败"
+        exit 1
+    fi
+
+    # 转为16kHz单声道WAV（Whisper处理更快更省内存）
+    echo "   🔄 音频格式优化（16kHz 单声道）..."
+    WAV_FILE="${OUTPUT_DIR}/bilibili_audio.wav"
+    ffmpeg -y -i "$AUDIO_FILE" -ar 16000 -ac 1 "$WAV_FILE" 2>/dev/null
+
+    if [ -f "$WAV_FILE" ] && [ -s "$WAV_FILE" ]; then
+        AUDIO_FILE="$WAV_FILE"
+        echo "   ✅ 音频已优化"
+    fi
+
+    # 运行Whisper
+    WHISPER_ARGS=("$AUDIO_FILE" --model "$WHISPER_MODEL" --output_format txt --output_dir "$OUTPUT_DIR")
+    if [ -n "$WHISPER_LANG" ]; then
+        WHISPER_ARGS+=(--language "$WHISPER_LANG")
+    fi
+
+    echo "   🎤 开始语音转文字（模型: $WHISPER_MODEL）..."
+    whisper "${WHISPER_ARGS[@]}" 2>&1
+
+    TXT_FILE="${OUTPUT_DIR}/bilibili_audio.txt"
+    if [ ! -f "$TXT_FILE" ]; then
+        TXT_FILE=$(find "$OUTPUT_DIR" -maxdepth 1 -name "*bilibili_audio*.txt" -type f 2>/dev/null | head -1)
+    fi
+
+    if [ -n "$TXT_FILE" ] && [ -s "$TXT_FILE" ]; then
+        echo "✅ 转录完成"
+        TRANSCRIPT_SOURCE="Whisper $WHISPER_MODEL 模型"
+        if [ "$HAS_CUDA" = true ]; then
+            TRANSCRIPT_SOURCE="$TRANSCRIPT_SOURCE（GPU加速）"
+        fi
+        TRANSCRIPT_TEXT=$(cat "$TXT_FILE")
+        rm -f "$TXT_FILE"
+    else
+        echo "❌ 转录失败"
+        exit 1
+    fi
+fi
+
+# 繁体转简体
+if command -v opencc >/dev/null 2>&1; then
+    echo "🔄 正在转换为简体字..."
+    TRANSCRIPT_TEXT_SIMPLIFIED=$(echo "$TRANSCRIPT_TEXT" | opencc -c tw2s)
+else
+    TRANSCRIPT_TEXT_SIMPLIFIED="$TRANSCRIPT_TEXT"
+fi
+
+# 按发布年月组织输出目录
+PUB_YEAR=$(echo "$UPLOAD_DATE_FORMATTED" | cut -d'-' -f1)
+PUB_MONTH=$(echo "$UPLOAD_DATE_FORMATTED" | cut -d'-' -f2)
+if [ -n "$PUB_YEAR" ] && [ "$PUB_YEAR" != "未知时间" ]; then
+    OUTPUT_DIR="${OUTPUT_DIR}/${PUB_YEAR}/${PUB_MONTH}"
+    mkdir -p "$OUTPUT_DIR"
+fi
+
+SAFE_TITLE=$(echo "$TITLE" | python3 -c "import sys, re; s=sys.stdin.read().strip(); s=re.sub(r'[\\\\/:*?\"<>|]', '', s); s=re.sub(r'[\\s\\W]+', '-', s); s=re.sub(r'-+', '-', s).strip('-'); print(s[:60] or 'untitled')")
+AUTHOR_SAFE=$(echo "$AUTHOR" | python3 -c "import sys, re; s=sys.stdin.read().strip(); s=re.sub(r'[\\\\/:*?\"<>|]', '', s); s=re.sub(r'[\\s\\W]+', '-', s); s=re.sub(r'-+', '-', s).strip('-'); print(s[:30] or 'unknown')")
+OUTPUT_FILE="${OUTPUT_DIR}/${SAFE_TITLE}_${AUTHOR_SAFE}_${UPLOAD_DATE_FORMATTED}_${VIDEO_ID}.txt"
+
+echo "📝 正在生成转录文件..."
+
+cat > "$OUTPUT_FILE" << EOF
+================================================================================
+B站视频转录文档
+================================================================================
+
+📹 视频标题：$TITLE
+🔗 B站链接：$VIDEO_URL
+👤 作者：$AUTHOR
+📅 发布时间：$UPLOAD_DATE_FORMATTED
+⏱️  视频时长：$DURATION
+📝 转录来源：$TRANSCRIPT_SOURCE
+⏰ 转录时间：$(date '+%Y-%m-%d %H:%M:%S')
+
+================================================================================
+第一部分：视频摘要（AI生成）
+================================================================================
+
+【AI待处理：请阅读全文后，替换此行，写结构化摘要】
+
+================================================================================
+第二部分：完整原文
+================================================================================
+
+$TRANSCRIPT_TEXT_SIMPLIFIED
+
+================================================================================
+文档结束
+================================================================================
+EOF
+
+echo ""
+echo "✅ 转录完成！"
+echo "📄 文件已保存: $OUTPUT_FILE"
+echo "$OUTPUT_FILE"
