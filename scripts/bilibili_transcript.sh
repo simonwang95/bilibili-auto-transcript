@@ -1,8 +1,8 @@
 #!/bin/bash
-# B站视频字幕智能获取脚本 v3.0
-# 功能：CC字幕 → AI字幕 → Whisper转录（三级降级）
-# 支持：WSL Chromium/Edge Cookie、多语言AI字幕、GPU加速
-# v3.0 新增：CUDA检测、智能模型选择、Cookie过期提醒、音频优化
+# B站视频字幕智能获取脚本 v4.0
+# 功能：CC字幕 → AI字幕 → Qwen3-ASR 转录（三级降级）
+# 支持：WSL Chromium/Edge Cookie、多语言AI字幕、CUDA/ROCm/MPS/CPU、音频优化
+# v4.0 新增：Qwen3-ASR 替换 Whisper，自动选择 1.7B(GPU) / 0.6B(CPU)
 
 VIDEO_URL="$1"
 OUTPUT_DIR="${2:-$HOME/workspace/knowledge/bilibili}"
@@ -13,7 +13,8 @@ CLEANUP_DIR="$OUTPUT_DIR"
 cleanup_temp() {
     rm -f "$CLEANUP_DIR"/bilibili_subtitle*.srt "$CLEANUP_DIR"/bilibili_ai_subtitle*.srt \
           "$CLEANUP_DIR"/bilibili_audio*.mp3 "$CLEANUP_DIR"/bilibili_audio*.m4a \
-          "$CLEANUP_DIR"/bilibili_audio*.wav "$CLEANUP_DIR"/bilibili_audio*.txt
+          "$CLEANUP_DIR"/bilibili_audio*.wav "$CLEANUP_DIR"/bilibili_audio*.txt \
+          "$CLEANUP_DIR"/.qwen_transcript.txt
 }
 trap cleanup_temp EXIT
 
@@ -92,7 +93,6 @@ AUTHOR=$(echo "$VIDEO_INFO" | python3 -c "import sys, json; print(json.load(sys.
 UPLOAD_DATE=$(echo "$VIDEO_INFO" | python3 -c "import sys, json; print(json.load(sys.stdin).get('upload_date', '未知时间'))")
 DURATION=$(echo "$VIDEO_INFO" | python3 -c "import sys, json; d=json.load(sys.stdin).get('duration', 0); print(f'{int(d//60)}分{int(d%60)}秒')")
 VIDEO_ID=$(echo "$VIDEO_INFO" | python3 -c "import sys, json; print(json.load(sys.stdin).get('id', ''))")
-DURATION_SEC=$(echo "$VIDEO_INFO" | python3 -c "import sys, json; print(json.load(sys.stdin).get('duration', 0))")
 
 if [ "$UPLOAD_DATE" != "未知时间" ]; then
     UPLOAD_DATE_FORMATTED=$(echo "$UPLOAD_DATE" | sed 's/\(....\)\(..\)\(..\)/\1-\2-\3/')
@@ -168,9 +168,8 @@ if [ -z "$TRANSCRIPT_TEXT" ] && [ "$HAS_AI_SUBS" = true ]; then
     fi
 fi
 
-# 第3级：Whisper本地转录
+# 第2.5级：兜底 - 尝试直接下载AI字幕（解决 yt-dlp 列表检测不到的 AI 字幕）
 if [ -z "$TRANSCRIPT_TEXT" ]; then
-    # 兜底：尝试直接下载AI字幕（解决 yt-dlp 列表检测不到的 AI 字幕）
     echo "🔍 尝试直接下载 AI 字幕（兜底）..."
     for try_lang in "ai-zh" "ai-en" "ai-ja"; do
         yt-dlp "${COOKIE_ARGS[@]}" --skip-download --write-subs --write-auto-subs --sub-langs "$try_lang" --convert-subs srt \
@@ -185,60 +184,12 @@ if [ -z "$TRANSCRIPT_TEXT" ]; then
     done
 fi
 
+# 第3级：Qwen3-ASR 本地语音转文字
+# 有独显 → Qwen3-ASR-1.7B（自动检测 CUDA/ROCm/MPS）
+# 无独显 → Qwen3-ASR-0.6B（CPU）
 if [ -z "$TRANSCRIPT_TEXT" ]; then
-    echo "🎤 未发现字幕，使用Whisper本地语音转文字..."
+    echo "🎤 未发现字幕，使用 Qwen3-ASR 本地语音转文字..."
     echo "⏳ 这可能需要一些时间，请耐心等待..."
-
-    # 检测CUDA可用性
-    HAS_CUDA=false
-    if python3 -c "import torch; print(torch.cuda.is_available())" 2>/dev/null | grep -q "True"; then
-        HAS_CUDA=true
-        echo "   ✅ GPU加速可用（CUDA）"
-        GPU_NAME=$(python3 -c "import torch; print(torch.cuda.get_device_name(0))" 2>/dev/null)
-        echo "   🎮 GPU: $GPU_NAME"
-    else
-        echo "   ⚠️ GPU不可用，使用CPU模式（速度较慢）"
-        echo "   💡 建议安装CUDA版torch: pip install torch --index-url https://download.pytorch.org/whl/cu118"
-    fi
-
-    # 根据视频时长选择Whisper模型
-    DURATION_INT=${DURATION_SEC%.*}
-    DURATION_INT=${DURATION_INT:-0}
-    WHISPER_MODEL="medium"
-    if [ "$HAS_CUDA" = false ]; then
-        if [ "$DURATION_INT" -lt 300 ]; then
-            WHISPER_MODEL="tiny"
-            echo "   📐 视频较短(<5分钟)+CPU模式 → 使用 tiny 模型（快速）"
-        elif [ "$DURATION_INT" -lt 600 ]; then
-            WHISPER_MODEL="base"
-            echo "   📐 视频中等(<10分钟)+CPU模式 → 使用 base 模型"
-        else
-            WHISPER_MODEL="small"
-            echo "   📐 视频较长(>10分钟)+CPU模式 → 使用 small 模型（平衡）"
-        fi
-    else
-        if [ "$DURATION_INT" -lt 180 ]; then
-            WHISPER_MODEL="tiny"
-            echo "   📐 短视频(<3分钟) → 使用 tiny 模型（快速）"
-        elif [ "$DURATION_INT" -lt 600 ]; then
-            WHISPER_MODEL="base"
-            echo "   📐 中等时长(<10分钟) → 使用 base 模型"
-        elif [ "$DURATION_INT" -lt 1800 ]; then
-            WHISPER_MODEL="medium"
-            echo "   📐 较长视频(10-30分钟) → 使用 medium 模型"
-        else
-            WHISPER_MODEL="medium"
-            echo "   📐 长视频(>30分钟) → 使用 medium 模型（如需 large-v3 请手动指定）"
-        fi
-    fi
-
-    # 检测视频语言（判断是否为中文内容）
-    WHISPER_LANG=""
-    TITLE_LOWER=$(echo "$TITLE" | python3 -c "import sys; print(sys.stdin.read().strip().lower())")
-    if echo "$TITLE_LOWER" | grep -qP '[\x{4e00}-\x{9fff}]'; then
-        WHISPER_LANG="zh"
-        echo "   🌐 检测到中文标题，指定 --language zh 提高准确率"
-    fi
 
     # 下载音频
     echo "   ⬇️ 下载音频..."
@@ -252,7 +203,7 @@ if [ -z "$TRANSCRIPT_TEXT" ]; then
         exit 1
     fi
 
-    # 转为16kHz单声道WAV（Whisper处理更快更省内存）
+    # 转为 16kHz 单声道 WAV（统一格式，兼容性最好）
     echo "   🔄 音频格式优化（16kHz 单声道）..."
     WAV_FILE="${OUTPUT_DIR}/bilibili_audio.wav"
     ffmpeg -y -i "$AUDIO_FILE" -ar 16000 -ac 1 "$WAV_FILE" 2>/dev/null
@@ -262,30 +213,36 @@ if [ -z "$TRANSCRIPT_TEXT" ]; then
         echo "   ✅ 音频已优化"
     fi
 
-    # 运行Whisper
-    WHISPER_ARGS=("$AUDIO_FILE" --model "$WHISPER_MODEL" --output_format txt --output_dir "$OUTPUT_DIR")
-    if [ -n "$WHISPER_LANG" ]; then
-        WHISPER_ARGS+=(--language "$WHISPER_LANG")
+    # 调用 Qwen3-ASR 转录
+    # Python 脚本自动检测设备、自动选择模型（1.7B/0.6B）
+    Q3_DIR="$(cd "$(dirname "$0")" && pwd)"
+    Q3_SCRIPT="${Q3_DIR}/qwen3_transcribe.py"
+    Q3_PYTHON="${Q3_DIR}/../.venv/bin/python3"
+    Q3_OUTPUT_FILE="${OUTPUT_DIR}/.qwen_transcript.txt"
+
+    if [ ! -f "$Q3_PYTHON" ]; then
+        echo "   ❌ 未找到虚拟环境 Python"
+        echo "   请先执行以下命令安装依赖:"
+        echo "     cd ${Q3_DIR}/.."
+        echo "     python3 -m venv .venv"
+        echo "     .venv/bin/pip install qwen-asr"
+        exit 1
     fi
 
-    echo "   🎤 开始语音转文字（模型: $WHISPER_MODEL）..."
-    whisper "${WHISPER_ARGS[@]}" 2>&1
+    echo "   🎤 开始语音转文字..."
+    "$Q3_PYTHON" "$Q3_SCRIPT" --audio "$AUDIO_FILE" --output-file "$Q3_OUTPUT_FILE"
 
-    TXT_FILE="${OUTPUT_DIR}/bilibili_audio.txt"
-    if [ ! -f "$TXT_FILE" ]; then
-        TXT_FILE=$(find "$OUTPUT_DIR" -maxdepth 1 -name "*bilibili_audio*.txt" -type f 2>/dev/null | head -1)
-    fi
-
-    if [ -n "$TXT_FILE" ] && [ -s "$TXT_FILE" ]; then
+    if [ -f "$Q3_OUTPUT_FILE" ] && [ -s "$Q3_OUTPUT_FILE" ]; then
+        # 输出文件格式：
+        #   第一行：转录来源（如 "Qwen3-ASR-1.7B（GPU加速）"）
+        #   第二行起：完整转录文本
+        TRANSCRIPT_SOURCE=$(head -1 "$Q3_OUTPUT_FILE")
+        TRANSCRIPT_TEXT=$(tail -n +2 "$Q3_OUTPUT_FILE")
+        rm -f "$Q3_OUTPUT_FILE"
         echo "✅ 转录完成"
-        TRANSCRIPT_SOURCE="Whisper $WHISPER_MODEL 模型"
-        if [ "$HAS_CUDA" = true ]; then
-            TRANSCRIPT_SOURCE="$TRANSCRIPT_SOURCE（GPU加速）"
-        fi
-        TRANSCRIPT_TEXT=$(cat "$TXT_FILE")
-        rm -f "$TXT_FILE"
     else
-        echo "❌ 转录失败"
+        echo "❌ Qwen3-ASR 转录失败"
+        rm -f "$Q3_OUTPUT_FILE"
         exit 1
     fi
 fi

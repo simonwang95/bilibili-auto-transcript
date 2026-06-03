@@ -7,6 +7,8 @@
   - 自动重试失败任务
   - 生成转录报告 CSV
   - 支持 LLM 摘要自动生成（可选）
+
+注意：请在技能虚拟环境中运行（.venv/bin/python3）。
 """
 import csv
 import hashlib
@@ -24,7 +26,7 @@ STATE_DIR = os.path.expanduser("~/.openclaw/workspace/.auto-transcript-state")
 PROCESSED_FILE = os.path.join(STATE_DIR, "processed_videos.txt")
 REPORT_FILE = os.path.join(STATE_DIR, "transcript_report.csv")
 OUTPUT_DIR = os.path.expanduser("~/workspace/knowledge/bilibili")
-MAX_RETRIES = 2      # 非 Whisper 失败最大重试次数
+MAX_RETRIES = 2      # 转录失败最大重试次数
 BATCH_DELAY = 3      # 视频间延迟（秒）
 
 os.makedirs(STATE_DIR, exist_ok=True)
@@ -104,7 +106,7 @@ def transcribe_video(bvid, attempt=1, max_retries=1):
         if stderr_preview:
             print(f"STDERR: {stderr_preview}")
 
-    used_whisper = "🎤" in result.stdout or "Whisper" in result.stdout
+    used_stt = "🎤" in result.stdout
 
     if "✅ 转录完成" in result.stdout:
         saved_file = None
@@ -116,10 +118,10 @@ def transcribe_video(bvid, attempt=1, max_retries=1):
             if "转录来源" in line:
                 transcript_source = line.replace("📝 转录来源：", "").strip()
                 break
-        return True, saved_file or "unknown", transcript_source or "unknown", used_whisper
+        return True, saved_file or "unknown", transcript_source or "unknown", used_stt
     else:
         error_msg = result.stdout[-300:] if result.stdout else "无输出"
-        return False, error_msg, None, used_whisper
+        return False, error_msg, None, used_stt
 
 
 def generate_summary(filepath, api_key=None, api_url=None):
@@ -238,23 +240,23 @@ def main():
         print(f"   ⏱️  {v['duration']} | 👤 {v['upper']}")
 
         # 带重试的转录
-        # AI 字幕/CC 字幕失败可重试（快速），Whisper 失败直接跳过（耗时）
+        # AI 字幕/CC 字幕失败可重试（快速），Qwen3-ASR 失败也直接跳过（模型加载慢）
         ok = False
         output_file = None
         transcript_source = None
-        used_whisper = False
+        used_stt = False
         max_attempts = MAX_RETRIES + 1
         for attempt in range(1, max_attempts + 1):
-            ok, output_path, transcript_source, used_whisper = transcribe_video(bvid, attempt, max_attempts)
+            ok, output_path, transcript_source, used_stt = transcribe_video(bvid, attempt, max_attempts)
             if ok:
                 output_file = output_path
                 break
-            if used_whisper:
-                print("   ⏭️ Whisper 失败，跳过重试（GPU 转录重试无意义）")
+            if used_stt:
+                print("   ⏭️ Qwen3-ASR 失败，跳过重试（模型加载耗时）")
                 break
             if attempt <= MAX_RETRIES:
                 wait = BATCH_DELAY * attempt
-                print(f"   ⏳ 等待 {wait} 秒后重试（非 Whisper 模式）...")
+                print(f"   ⏳ 等待 {wait} 秒后重试...")
                 time.sleep(wait)
 
         if ok and output_file and output_file != "unknown":
