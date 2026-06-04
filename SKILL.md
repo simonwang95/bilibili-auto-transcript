@@ -1,8 +1,8 @@
 ---
 name: bilibili-auto-transcript
-version: "4.0.0"
-description: "B站视频转录+收藏夹扫描。三级降级（CC→AI→Qwen3-ASR），自动选模型（1.7B GPU / 0.6B CPU），AI摘要生成。"
-homepage: https://clawhub.ai/54lynnn/bilibili-transcript
+version: "5.1.0"
+description: "B站视频转录+收藏夹扫描+本地文件转录。双引擎ASR（Qwen3-ASR / Whisper MLX），三级降级（CC→AI→ASR），LLM摘要+思维导图+校对。"
+homepage: https://github.com/simonwang95/bilibili-auto-transcript
 metadata:
   {
     "openclaw":
@@ -12,10 +12,10 @@ metadata:
         "install":
           [
             {
-              "id": "venv",
+              "id": "deps",
               "kind": "shell",
-              "command": "cd {{SKILL_DIR}} && python3 -m venv .venv && .venv/bin/pip install qwen-asr requests",
-              "label": "Setup virtual env & install Qwen3-ASR",
+              "command": "cd {{SKILL_DIR}} && cp -n env.example env.local 2>/dev/null; conda activate course-whisper 2>/dev/null && pip install qwen-asr requests torch 2>/dev/null; echo '请编辑 env.local 填入你的配置'",
+              "label": "初始化配置 & 安装依赖",
             },
           ],
       },
@@ -24,207 +24,202 @@ metadata:
 
 # 📼 Bilibili 视频转录 & 收藏夹自动扫描
 
-**双模式技能** — 可以手动转录单个视频，也可以定时扫描收藏夹自动处理。
+**三模式技能** — 支持 B站单视频、收藏夹批量、本地文件目录转录。双引擎 ASR（Qwen3-ASR / Whisper MLX），LLM 三阶段后处理（摘要+思维导图+校对）。
 
-## 模式一：手动转录
+## 快速开始
 
-当你给我一个 B站链接时，我会自动执行转录。
+```bash
+# 1. 初始化配置
+cp env.example env.local
+# 编辑 env.local，填入 FAV_MEDIA_ID、LLM 配置等
 
-**用法：**
+# 2. 安装依赖
+conda activate course-whisper
+pip install qwen-asr requests torch        # Qwen3 引擎
+pip install mlx-whisper                     # Whisper 引擎（Apple Silicon）
+
+# 3. 确认系统依赖
+yt-dlp --version && ffmpeg -version
+```
+
+---
+
+## 模式一：B站收藏夹转录
+
+定时检查 B站收藏夹，发现新视频后自动完成「转录 → AI 后处理 → 报告」全流程。
+
+```bash
+python scripts/batch_transcribe.py
+```
+
+**三级降级转录策略：**
+
+| 优先级 | 来源 | 准确率 | 速度 |
+|:------:|:----:|:------:|:----:|
+| 1 | 人工 CC 字幕（zh-CN, en, ja 等） | ~100% | 秒出 |
+| 2 | B站 AI 字幕（ai-zh, ai-en 等 9 种语言） | 85-90% | 秒出 |
+| 3 | Qwen3-ASR 本地转录（1.7B / 0.6B） | 93-96% CER | 分钟级 |
+
+支持断点续传（avid 去重）、自动重试、CSV 报告。输出 Markdown 文件，按视频发布日期分目录（`bilibili/YYYY-MM/`）。
+
+**设置 `SUMMARY_API_KEY` 后自动执行三阶段 LLM 后处理：**
+1. **结构化摘要** — 核心观点 + 主要论点 + 关键结论
+2. **思维导图** — 缩进 Markdown 列表格式
+3. **AI 校对** — 修正 ASR 同音错别字 + 断句优化 + 领域术语检查（金融/计算机/医学/法律/工程）
+
+---
+
+## 模式二：本地文件转录
+
+给定本地目录，自动扫描视频/音频文件，用 ASR 引擎语音转文字，输出 Markdown 文件。
+
+```bash
+# 基本用法
+bash scripts/bilibili_transcript.sh --local-dir /path/to/videos/
+
+# 含 LLM 后处理
+python scripts/batch_transcribe.py --local-dir /path/to/videos/
+```
+
+**支持格式：** mp4, mkv, avi, mov, webm, flv, wmv, ts（视频）；mp3, m4a, wav, flac, ogg, opus, aac（音频）
+
+**流程：** 扫描目录 → 视频提取音轨 → ffmpeg 转 16kHz WAV → ASR 转录 → LLM 后处理。结果保存到 `bilibili/local/`。
+
+---
+
+## 模式三：手动转录单个 B站视频
+
 ```bash
 bash scripts/bilibili_transcript.sh "https://www.bilibili.com/video/BVxxxxx/"
 ```
 
-**转录优先级（自动降级）：**
-1. ✅ **人工CC字幕**（zh-CN, zh-TW, en, ja 等）→ 100%准确，秒出
-2. ✅ **AI字幕**（ai-zh, ai-en, ai-ja 等9种语言）→ 85-90%准确，秒出
-3. ✅ **Qwen3-ASR 语音转文字**（智能选模型）→ 有独显用 1.7B，无独显用 0.6B
+---
+
+## ASR 引擎
+
+通过 `env.local` 中的 `ASR_ENGINE` 切换：
+
+| 引擎 | 配置值 | 中文质量 | 适用平台 | 依赖 |
+|:----:|:------:|:--------:|:--------:|:----:|
+| Qwen3-ASR | `qwen3` | CER ~3.8% (1.7B) | CUDA / MPS / CPU | qwen-asr, torch |
+| Whisper v3 Turbo | `whisper` | 良好 | Apple Silicon (MLX) | mlx-whisper |
 
 **Qwen3-ASR 智能模型选择：**
 
-| 条件 | 模型 | 中文 CER | 显存需求 |
-|:----:|:----:|:--------:|:-------:|
-| **有 NVIDIA/AMD GPU** | Qwen3-ASR-1.7B | ~3.8% | 4-6 GB |
-| **有 Apple Silicon (M1-M4)** | Qwen3-ASR-1.7B (MLX) | ~3.8% | 3-4 GB |
-| **无独显 (CPU)** | Qwen3-ASR-0.6B | ~5-7% | 2 GB 或不需 |
-| **对比: Whisper medium** | (旧版) | ~12% | 5-6 GB |
+| 条件 | 模型 |
+|:----:|:----:|
+| NVIDIA/AMD GPU | Qwen3-ASR-1.7B |
+| Apple Silicon (MPS) | Qwen3-ASR-1.7B |
+| CPU / FORCE_ASR_CPU | Qwen3-ASR-0.6B |
 
-- 自动检测 CUDA / ROCm / Apple MPS / CPU
-- 同一模型权重，自动切换计算后端
-- 音频自动转为 16kHz 单声道 WAV（统一格式）
-
-**⚠️ 关键步骤（必须执行）：** 脚本运行后，**AI必须先做这件事**，才能向用户报告完成：
-
-1. **写摘要** → `read` 输出的 TXT 文件，阅读全文，用 `edit` 替换占位符为结构化摘要
-
-转录只负责出文件，索引那是 knowledge-rag 自己的事。
-
----
-
-## 模式二：收藏夹自动扫描
-
-定时检查 B站收藏夹，发现新视频后自动完成「转录 → AI 摘要 → 保存 → 通知」全流程。
-
-### 工作流
-
-```
-定时触发 → 扫描收藏夹API → 对比已处理列表
-  → 发现新视频 → 转录（三级降级）
-  → （可选）AI读全文、写结构化摘要
-  → 覆盖TXT中的摘要占位符
-  → 记录avid到已处理列表
-  → 生成转录报告CSV
-  → 通知用户（标题/作者/时长/转录来源/摘要/TXT文件）
-```
-
-### 批量转录（推荐）
+使用本地模型时设置 `ASR_LOCAL_MODEL` 指向模型目录即可跳过下载。
 
 ```bash
-.venv/bin/python3 scripts/batch_transcribe.py
-```
-
-自动扫描收藏夹全部视频，逐个转录，支持：
-- **断点续传** — 中断后重跑自动跳过已处理视频
-- **自动重试** — 失败任务自动重试2次
-- **转录报告** — 生成 CSV 报告，含来源分布统计
-- **AI摘要** — 可选，设置环境变量 `OPENAI_API_KEY` 即可自动生成摘要
-- **目录组织** — 按视频发布年月自动分目录存储
-
-### 首次设置
-
-#### 1. 安装依赖
-在技能目录下创建虚拟环境并安装依赖：
-```bash
-cd ~/.openclaw/workspace/skills/bilibili-auto-transcript
-python3 -m venv .venv
-.venv/bin/pip install qwen-asr requests
-```
-
-#### 2. 创建收藏夹
-B站新建一个收藏夹，设为**公开**。
-
-#### 3. 获取收藏夹ID
-URL 中 `fid=` 后面的数字。
-
-#### 4. 修改扫描脚本
-编辑 `scripts/bilibili_scanner.py`，改 `FAV_MEDIA_ID` 为你的收藏夹ID。
-
-#### 5. Chromium 登录B站（获取Cookie）
-```bash
-chromium-browser &
-# 打开 bilibili.com 并登录
-```
-
-#### 6. 检查依赖
-```bash
-yt-dlp --version    # 必需
-ffmpeg -version     # 必需
-.venv/bin/python3 -c "from qwen_asr import Qwen3ASRModel; print('Qwen3-ASR OK')"  # 必需
-opencc --version    # 可选，繁转简
-```
-
-#### 7. 配置定时任务（推荐每6小时）
-```bash
-openclaw cron add \
-  --name bilibili-scan \
-  --every 21600000 \
-  --message "运行扫描脚本：cd ~/.openclaw/workspace/skills/bilibili-auto-transcript && .venv/bin/python3 scripts/bilibili_scanner.py"
+# env.local 中
+ASR_ENGINE="whisper"
+ASR_LOCAL_MODEL="/path/to/mlx-community/whisper-large-v3-turbo"
+FORCE_ASR="true"   # 跳过 B站字幕检测，强制用本地 ASR
 ```
 
 ---
 
-## 公共部分
+## 配置
 
-### 转录脚本
-`scripts/bilibili_transcript.sh` — 两个模式共享同一个引擎（v4.0）。
-`scripts/qwen3_transcribe.py` — Qwen3-ASR 转录辅助脚本（自动设备检测+模型选择）。
+所有配置集中在 `env.local`（参考 `env.example` 创建）。核心配置项：
 
-### 依赖
-- `yt-dlp` — 视频下载、字幕获取
-- `ffmpeg` — 音频处理
-- `.venv/bin/python3` — 技能虚拟环境，内含 `qwen-asr`（语音转文字）、`requests`（HTTP请求）
-- `opencc` — 繁转简（可选）
-- `chromium-browser` — Cookie 支持（B站AI字幕）
+| 配置 | 说明 |
+|------|------|
+| `FAV_MEDIA_ID` | B站收藏夹 ID |
+| `ASR_ENGINE` | `qwen3` 或 `whisper` |
+| `ASR_LOCAL_MODEL` | 本地模型路径，留空自动下载 |
+| `FORCE_ASR` | `true` 跳过 B站字幕，直接本地转录 |
+| `SUMMARY_API_KEY` | LLM API Key，留空跳过 LLM 后处理 |
+| `SUMMARY_API_URL` | LLM 端点（兼容 OpenAI / LM Studio / Ollama） |
+| `SUMMARY_MODEL` | 模型名称 |
+| `PROOFREAD_DOMAINS` | 校对领域，逗号分隔 |
+| `LLM_TIMEOUT` | LLM 读取超时（秒），默认 600 |
 
-### 输出文件格式
-```
-================================================================================
-B站视频转录文档
-================================================================================
-
-📹 视频标题：xxx
-🔗 B站链接：xxx
-👤 作者：xxx
-📅 发布时间：xxx
-⏱️  视频时长：xxx
-📝 转录来源：CC字幕 / B站AI字幕 / Qwen3-ASR-1.7B（GPU加速）/ Qwen3-ASR-0.6B
-⏰ 转录时间：xxx
-
-================================================================================
-第一部分：视频摘要（AI生成）
-================================================================================
-
-【AI待处理：请阅读全文后，替换此行，写结构化摘要】
-（设置 OPENAI_API_KEY 后自动生成）
-
-================================================================================
-第二部分：完整原文
-================================================================================
-
-（完整转录内容...）
-
-================================================================================
-文档结束
-================================================================================
-```
-
-### 配置参数
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| 收藏夹ID | （需设置） | URL `fid=` 的数字 |
-| 输出目录 | `~/workspace/knowledge/bilibili/` | TXT存放路径，自动按年/月分子目录 |
-| 已处理记录 | `~/.openclaw/workspace/.auto-transcript-state/processed_videos.txt` | 去重文件（每行一个avid） |
-| 转录报告 | `~/.openclaw/workspace/.auto-transcript-state/transcript_report.csv` | 每次批量转录的详细报告 |
-| 扫描间隔 | 每6小时 | 自动模式定时 |
-| OPENAI_API_KEY | （可选） | 设置后自动生成AI摘要 |
-
-### B站收藏夹API
-```
-GET https://api.bilibili.com/x/v3/fav/resource/list?media_id={ID}&ps=20&pn=1
-```
-- `ps` 最大20（脚本已设 ps=20）
-- 公开收藏夹无需Cookie
-
-### avid vs bvid
-- `id` = avid（数字）→ 去重追踪用
-- `bvid` / `bv_id` = BV号 → 构建转录URL用
-
-### 注意事项
-1. **同文件覆盖** — 同一BV号多次转录覆盖旧文件，已处理列表防重复
-2. **需要Cookie** — 通过 Chromium cookie 获取 AI 字幕，需先B站登录；Cookie快过期时脚本会提示
-3. **Qwen3-ASR 首次运行** — 首次使用时会自动从 HuggingFace 下载模型权重（0.6B ~2GB / 1.7B ~5GB），后续使用无需下载
-4. **Qwen3-ASR 耗时** — GPU模式（1.7B）约实时 0.3x 倍速，CPU模式（0.6B）约实时 0.4x 倍速
-5. **虚拟环境** — 所有 Python 脚本需在 `.venv` 中运行：`.venv/bin/python3 scripts/xxx.py`；`bilibili_transcript.sh` 会自动检测并提示安装
-6. **B站API ps上限20** — 超过需分页
-7. **摘要占位符必须替换** — 设置 `OPENAI_API_KEY` 环境变量可自动生成摘要
-8. **只干自己的事** — 转录只输出文件。索引是 knowledge-rag 的事情
-9. **输出目录** — 自 v3.0 起按视频发布年月自动组织目录（如 `bilibili/2026/06/`）
-
-## 推荐搭配：📖 Knowledge RAG
-
-装了这个 skill 后再装 **knowledge-rag**，知识库会定时自动扫描新文件并索引，无需手动操作：
-
-```bash
-clawhub install knowledge-rag
-```
-
-转录后自动索引，随时用自然语言搜索所有转过的内容，还有网页搜索界面。
+完整配置说明见 [docs/config.md](docs/config.md)。
 
 ---
 
-## 📦 开源 & 交流
+## 项目结构
 
-- **GitHub**：[github.com/54Lynnn/bilibili-auto-transcript](https://github.com/54Lynnn/bilibili-auto-transcript)（⭐️ Star 支持）
-- **ClawHub**：[clawhub.ai/54lynnn/bilibili-auto-transcript](https://clawhub.ai/54lynnn/bilibili-auto-transcript)
-- **QQ 群**：120363664（欢迎扫码加入交流）
+```
+bilibili-auto-transcript/
+├── SKILL.md                     # 本文件
+├── README.md
+├── env.example                  # 配置模板（可提交）
+├── env.local                    # 本地配置（不提交）
+├── .gitignore
+├── docs/                        # 项目文档
+│   ├── index.md
+│   ├── architecture.md
+│   ├── scripts.md
+│   ├── api.md
+│   └── config.md
+├── scripts/
+│   ├── bilibili_transcript.sh   # 转录引擎 v5.1
+│   ├── bilibili_scanner.py      # 收藏夹扫描 v1.2
+│   ├── qwen3_transcribe.py      # Qwen3-ASR v1.3
+│   ├── whisper_transcribe.py    # Whisper MLX v1.0
+│   └── batch_transcribe.py      # 批量调度 v3.0
+├── cache/audio/                 # 音频缓存
+└── models/                      # ASR 模型权重
+```
+
+## 依赖
+
+| 工具 | 用途 | 必需 |
+|------|------|:----:|
+| yt-dlp | 视频/字幕/音频下载 | ✅ |
+| ffmpeg | 音频格式转换 | ✅ |
+| qwen-asr | Qwen3-ASR 引擎 | 二选一 |
+| mlx-whisper | Whisper MLX 引擎 | 二选一 |
+| torch | Qwen3-ASR 推理后端 | Qwen3 需要 |
+| requests | HTTP 请求（B站 API / LLM） | ✅ |
+| opencc | 繁体转简体 | ❌ |
+
+## 输出格式
+
+Markdown 文件，包含五个区域：
+
+```markdown
+# 视频标题
+> **链接**：...  **作者**：...  **转录来源**：...
+
+---
+
+## 视频摘要
+（LLM 生成的结构化摘要）
+
+---
+
+## 思维导图
+（LLM 生成的缩进列表）
+
+---
+
+## 完整原文
+（转录文本）
+
+---
+
+## AI校对
+（LLM 校对后的可读版本）
+```
+
+## 注意事项
+
+- B站 AI 字幕需要浏览器 Cookie（macOS 用 Chrome/Safari，Linux 用 chromium）
+- 私有收藏夹需设置 `BILI_COOKIE_FILE` 或改为公开
+- Qwen3-ASR 首次运行从 HuggingFace 下载模型（1.7B ~5GB，0.6B ~2GB）
+- Apple Silicon 上 Qwen3-ASR MPS 可能内存超限，设置 `FORCE_ASR_CPU=true` 或换用 Whisper 引擎
+- 本地文件模式不走 B站 API，不需要 Cookie，结果保存到 `local/` 子目录
+- 转录只输出文件，索引由 knowledge-rag 或其他工具负责
+
+---
+
+## 📦 开源
+
+- **GitHub**：[github.com/simonwang95/bilibili-auto-transcript](https://github.com/simonwang95/bilibili-auto-transcript)
