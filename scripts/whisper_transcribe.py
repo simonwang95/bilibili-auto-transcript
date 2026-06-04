@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""
+Whisper 语音转录辅助脚本 v1.0
+基于 Apple MLX 的 Whisper large-v3-turbo，专为 Apple Silicon 优化。
+
+输出格式（写入 --output-file）：
+  第一行：转录来源字符串（如 "Whisper-large-v3-turbo（MLX加速）"）
+  第二行起：完整转录文本
+"""
+
+import argparse
+import os
+import sys
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Whisper (MLX) 语音转录")
+    parser.add_argument("--audio", required=True, help="音频文件路径")
+    parser.add_argument("--output-file", required=True, help="输出文件路径（第一行=来源，后续=文本）")
+    parser.add_argument("--model-path", required=True, help="本地 Whisper 模型路径")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.audio):
+        print(f"错误: 音频文件不存在: {args.audio}", file=sys.stderr)
+        sys.exit(1)
+
+    if not os.path.exists(args.model_path):
+        print(f"错误: 模型路径不存在: {args.model_path}", file=sys.stderr)
+        sys.exit(1)
+
+    model_name = os.path.basename(args.model_path.rstrip("/"))
+    print(f"🎤 使用本地 Whisper 模型: {model_name}", file=sys.stderr)
+    print(f"   📦 路径: {args.model_path}", file=sys.stderr)
+    print(f"   ⏳ 加载模型中...", file=sys.stderr)
+
+    try:
+        import mlx_whisper
+    except ImportError:
+        print("错误: 请安装 mlx-whisper: pip install mlx-whisper", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        print(f"   ✅ 模型加载完成", file=sys.stderr)
+        print(f"   🎤 正在转录...", file=sys.stderr)
+
+        result = mlx_whisper.transcribe(
+            args.audio,
+            path_or_hf_repo=args.model_path,
+        )
+        transcript = result.get("text", "").strip()
+
+        if not transcript:
+            print("错误: 转录结果为空", file=sys.stderr)
+            sys.exit(1)
+
+        # === 构造来源描述 ===
+        source = f"Whisper-{model_name}（MLX加速）"
+
+        # === 写入输出文件 ===
+        with open(args.output_file, "w", encoding="utf-8") as f:
+            f.write(source + "\n")
+            f.write(transcript + "\n")
+
+        print(f"   ✅ 转录完成", file=sys.stderr)
+        print(f"   📄 来源: {source}", file=sys.stderr)
+
+    except Exception as e:
+        print(f"错误: 转录失败 - {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

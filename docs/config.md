@@ -1,0 +1,149 @@
+# 配置指南
+
+所有可配置项集中在项目根目录的 `env.local` 文件中。该文件不会被提交到 git。
+
+---
+
+## 配置文件格式
+
+`env.local` 使用 Bash/Python 兼容的 `KEY="value"` 格式。Shell 脚本通过 `source` 加载，Python 脚本通过自定义解析器加载。
+
+```bash
+# 注释以 # 开头
+KEY="value"
+ANOTHER_KEY="another value"
+```
+
+---
+
+## 配置项详解
+
+### 收藏夹
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `FAV_MEDIA_ID` | `""` （需设置） | B站收藏夹 ID，从 URL `?fid=` 后的数字获取 |
+| `BILI_COOKIE_FILE` | `""` | 私有收藏夹需要。指向 Netscape 格式 Cookie 文件的路径。留空使用公开访问 |
+
+关于公开 vs 私有收藏夹：公开收藏夹只需 `FAV_MEDIA_ID`；私有收藏夹需要同时设置 `BILI_COOKIE_FILE`。报「访问权限不足」说明收藏夹为私有。
+
+### 路径配置
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `OUTPUT_DIR` | `"$HOME/workspace/knowledge/bilibili"` | 输出目录。B站模式按 `YYYY-MM/` 分子目录，本地文件保存到 `local/` 子目录 |
+| `CACHE_DIR` | `"./cache/audio"` | 下载音频的临时缓存，脚本退出时自动清理 |
+| `MODEL_CACHE_DIR` | `"./models"` | Qwen3-ASR 从 HuggingFace 下载时的缓存目录。Whisper 引擎不使用此配置 |
+| `STATE_DIR` | `"$HOME/.openclaw/workspace/.auto-transcript-state"` | 已处理记录与 CSV 报告 |
+
+### Conda 环境
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `CONDA_ENV` | `"course-whisper"` | 运行 Python 脚本的 conda 环境名。自动三级回退：conda → .venv → 系统 python3 |
+
+依赖安装：
+
+```bash
+conda activate course-whisper
+
+# Qwen3-ASR 引擎
+pip install qwen-asr requests torch
+
+# Whisper MLX 引擎（Apple Silicon 推荐）
+pip install mlx-whisper
+```
+
+### 浏览器 Cookie
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `BROWSER_TYPE` | `"chrome"` | macOS: chrome / chromium / edge / safari / firefox。Linux: chromium / firefox |
+
+### ASR 引擎
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `ASR_ENGINE` | `"qwen3"` | 语音转文字引擎：`qwen3`（中文 CER ~3.8%）或 `whisper`（MLX 加速，Apple Silicon 原生优化） |
+| `ASR_LOCAL_MODEL` | `""` | 本地模型路径。相对路径以项目根目录为基准。Whisper 示例：`"/Users/wyq/.lmstudio/models/mlx-community/whisper-large-v3-turbo"` |
+| `FORCE_ASR` | `"false"` | 设为 `true` 跳过 B站 CC/AI 字幕检测，强制用本地 ASR 转录 |
+| `FORCE_ASR_CPU` | `"false"` | Qwen3-ASR 专用。Apple Silicon 上 MPS 可能内存超限（47GB），设为 `true` 强制 CPU 推理 |
+
+`ASR_ENGINE=whisper` 时自动忽略 `FORCE_ASR_CPU`（Whisper 走 MLX 不走 PyTorch MPS）。
+
+### LLM 后处理
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `SUMMARY_API_KEY` | `""` | LLM API Key。留空跳过摘要/导图/校对三阶段 |
+| `SUMMARY_API_URL` | `"https://api.openai.com/v1/chat/completions"` | LLM API 端点，自动补全 `/chat/completions` |
+| `SUMMARY_MODEL` | `"gpt-4o-mini"` | 三阶段共用的模型名称 |
+| `SUMMARY_MAX_TOKENS` | `"1024"` | 每次 LLM 调用的最大 token 数 |
+| `LLM_TIMEOUT` | `"600"` | LLM API 读取超时（秒），默认 600 适用于本地模型长文本 |
+| `PROOFREAD_DOMAINS` | `""` | 校对时关注的专有领域，逗号分隔。可选：finance / computer / medical / legal / engineering。留空默认启用金融+计算机 |
+
+设置 `SUMMARY_API_KEY` 后，每个转录完成会自动执行：
+
+1. **结构化摘要** — 核心观点 + 主要论点 + 关键结论
+2. **思维导图** — 缩进 Markdown 列表格式
+3. **AI 校对** — 修正同音错别字 + 断句优化 + 标点修正 + 领域术语检查
+
+三个阶段独立运行，一个失败不影响其他。
+
+### 转录行为
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `MAX_RETRIES` | `"2"` | 转录失败最大重试次数 |
+| `BATCH_DELAY` | `"3"` | 批量转录时视频间延迟（秒），防 B站风控 |
+| `ENABLE_OPENCC` | `"true"` | 繁体转简体 |
+
+---
+
+## 两种使用场景
+
+### 场景 A：B站收藏夹
+
+```bash
+# env.local 核心配置
+FAV_MEDIA_ID="3872645046"
+SUMMARY_API_KEY="lm-studio"
+
+# 启动
+python scripts/batch_transcribe.py
+```
+
+流程：扫描收藏夹 → avid 去重 → 三级降级转录（CC→AI→ASR）→ LLM 摘要/导图/校对 → CSV 报告。结果保存到 `bilibili/2026-06/`。
+
+### 场景 B：本地文件目录
+
+```bash
+# env.local 核心配置
+ASR_ENGINE="whisper"
+ASR_LOCAL_MODEL="/Users/wyq/.lmstudio/models/mlx-community/whisper-large-v3-turbo"
+FORCE_ASR="true"
+
+# 启动
+python scripts/batch_transcribe.py --local-dir "/path/to/videos/"
+```
+
+流程：扫描目录媒体文件 → ffmpeg 提取/转换音频 → ASR 转录 → LLM 摘要/导图/校对。结果保存到 `bilibili/local/`。不涉及 B站 API，不走去重。
+
+### 场景对比
+
+| | 场景 A：收藏夹 | 场景 B：本地文件夹 |
+|---|---|---|
+| 命令 | `python scripts/batch_transcribe.py` | `python scripts/batch_transcribe.py --local-dir <目录>` |
+| 输入来源 | B站收藏夹 API | 本地文件系统 |
+| 转录策略 | CC → AI → ASR 三级降级 | 直接 ASR |
+| 输出目录 | `bilibili/YYYY-MM/` | `bilibili/local/` |
+| 断点续传 | 是（avid 去重） | 否（每次全量） |
+| CSV 报告 | 是 | 否 |
+| 需要 Cookie | 是（AI 字幕） | 否 |
+| 需要 FAV_MEDIA_ID | 是 | 否 |
+
+---
+
+## 优先级规则
+
+命令行参数 > env.local > 脚本默认值。例如 `--output-dir /tmp/out` 覆盖 `env.local` 中的 `OUTPUT_DIR`。

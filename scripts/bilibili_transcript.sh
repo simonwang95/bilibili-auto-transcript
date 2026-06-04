@@ -1,35 +1,93 @@
 #!/bin/bash
-# B站视频字幕智能获取脚本 v4.0
+# =============================================================================
+# B站视频字幕智能获取脚本 v5.1
 # 功能：CC字幕 → AI字幕 → Qwen3-ASR 转录（三级降级）
-# 支持：WSL Chromium/Edge Cookie、多语言AI字幕、CUDA/ROCm/MPS/CPU、音频优化
-# v4.0 新增：Qwen3-ASR 替换 Whisper，自动选择 1.7B(GPU) / 0.6B(CPU)
+# 新增：本地目录批量转录（--local-dir）、env.local 配置、conda 环境
+# 支持：macOS Chrome/Safari/Firefox、WSL Chromium/Edge Cookie
+#       多语言AI字幕、CUDA/ROCm/MPS/CPU
+# =============================================================================
 
-VIDEO_URL="$1"
-OUTPUT_DIR="${2:-$HOME/workspace/knowledge/bilibili}"
+set -eo pipefail
+
+# ===== 顶层初始化（bash 3.2 兼容） =====
+COOKIE_ARGS=()
+
+# ===== 加载本地配置 =====
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+if [ -f "$PROJECT_DIR/env.local" ]; then
+    source "$PROJECT_DIR/env.local"
+fi
+
+# ===== 默认值（env.local 中的值会覆盖这些） =====
+OUTPUT_DIR="${OUTPUT_DIR:-$HOME/workspace/knowledge/bilibili}"
+CACHE_DIR="${CACHE_DIR:-$PROJECT_DIR/cache/audio}"
+MODEL_CACHE_DIR="${MODEL_CACHE_DIR:-$PROJECT_DIR/models}"
+BROWSER_TYPE="${BROWSER_TYPE:-chromium}"
+CONDA_ENV="${CONDA_ENV:-course-whisper}"
+ENABLE_OPENCC="${ENABLE_OPENCC:-true}"
+FORCE_ASR="${FORCE_ASR:-false}"
+
+# ===== 解析命令行参数 =====
+LOCAL_DIR=""
+VIDEO_URL=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --local-dir)
+            LOCAL_DIR="$2"
+            shift 2
+            ;;
+        --output-dir)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        *)
+            if [ -z "$VIDEO_URL" ]; then
+                VIDEO_URL="$1"
+            fi
+            shift
+            ;;
+    esac
+done
+
+# ===== 创建目录 =====
 mkdir -p "$OUTPUT_DIR"
-BROWSER_TYPE="${3:-chromium}"
+mkdir -p "$CACHE_DIR"
+mkdir -p "$MODEL_CACHE_DIR"
 
-CLEANUP_DIR="$OUTPUT_DIR"
+# ===== 获取 Python 路径（conda 环境优先） =====
+get_python() {
+    if command -v conda &>/dev/null && conda env list 2>/dev/null | grep -qw "$CONDA_ENV"; then
+        echo "conda"
+    elif [ -f "$PROJECT_DIR/.venv/bin/python3" ]; then
+        echo "$PROJECT_DIR/.venv/bin/python3"
+    else
+        echo "python3"
+    fi
+}
+
+run_python() {
+    local py="$(get_python)"
+    if [ "$py" = "conda" ]; then
+        conda run -n "$CONDA_ENV" python3 "$@"
+    else
+        "$py" "$@"
+    fi
+}
+
+# ===== 清理临时文件 =====
 cleanup_temp() {
-    rm -f "$CLEANUP_DIR"/bilibili_subtitle*.srt "$CLEANUP_DIR"/bilibili_ai_subtitle*.srt \
-          "$CLEANUP_DIR"/bilibili_audio*.mp3 "$CLEANUP_DIR"/bilibili_audio*.m4a \
-          "$CLEANUP_DIR"/bilibili_audio*.wav "$CLEANUP_DIR"/bilibili_audio*.txt \
-          "$CLEANUP_DIR"/.qwen_transcript.txt
+    rm -f "$CACHE_DIR"/bilibili_subtitle*.srt "$CACHE_DIR"/bilibili_ai_subtitle*.srt \
+          "$CACHE_DIR"/bilibili_audio*.mp3 "$CACHE_DIR"/bilibili_audio*.m4a \
+          "$CACHE_DIR"/bilibili_audio*.wav "$CACHE_DIR"/bilibili_audio*.txt \
+          "$CACHE_DIR"/.qwen_transcript.txt \
+          "$CACHE_DIR"/local_audio*.wav "$CACHE_DIR"/local_audio*.mp3 "$CACHE_DIR"/local_audio*.m4a
 }
 trap cleanup_temp EXIT
 
-if [ -z "$VIDEO_URL" ]; then
-    echo "用法: $0 <B站视频链接> [输出目录] [浏览器类型:chromium|edge|firefox]"
-    exit 1
-fi
-
-echo "🔍 正在获取视频信息..."
-
-# ===== 检测浏览器Cookie =====
-echo "🔍 检测浏览器Cookie..."
-
-COOKIE_ARGS=()
-
+# ===== 工具函数 =====
 detect_cookie() {
     local browser="$1"
     local path="$2"
@@ -46,260 +104,562 @@ detect_cookie() {
     return 1
 }
 
-case "$BROWSER_TYPE" in
-    chromium)
-        detect_cookie "chromium" "$HOME/snap/chromium/common/chromium" "WSL Chromium" || true
-        ;;
-    edge)
-        WIN_USER=$(ls /mnt/c/Users/ 2>/dev/null | grep -v "Public\|Default\|All Users" | head -1)
-        if [ -n "$WIN_USER" ]; then
-            detect_cookie "edge" "C:/Users/$WIN_USER/AppData/Local/Microsoft/Edge/User Data" "Windows Edge" || true
+get_cookie_args() {
+    COOKIE_ARGS=()
+
+    # 优先使用 env.local 中配置的 Cookie 文件（跨平台最稳定）
+    # 相对路径相对于项目根目录解析
+    if [ -n "${BILI_COOKIE_FILE:-}" ]; then
+        # 解析相对路径
+        if [[ "$BILI_COOKIE_FILE" != /* ]]; then
+            BILI_COOKIE_FILE="$PROJECT_DIR/$BILI_COOKIE_FILE"
         fi
-        ;;
-    firefox)
-        detect_cookie "firefox" "$HOME/snap/firefox/common/.mozilla/firefox" "WSL Firefox" || true
-        ;;
-esac
-
-if [ ${#COOKIE_ARGS[@]} -eq 0 ]; then
-    detect_cookie "chromium" "$HOME/snap/chromium/common/chromium" "WSL Chromium" || \
-    { WIN_USER=$(ls /mnt/c/Users/ 2>/dev/null | grep -v "Public\|Default\|All Users" | head -1); \
-      [ -n "$WIN_USER" ] && detect_cookie "edge" "C:/Users/$WIN_USER/AppData/Local/Microsoft/Edge/User Data" "Windows Edge"; } || \
-    detect_cookie "firefox" "$HOME/snap/firefox/common/.mozilla/firefox" "WSL Firefox" || true
-fi
-
-if [ ${#COOKIE_ARGS[@]} -eq 0 ]; then
-    echo "   ⚠️ 无可用Cookie，B站AI字幕可能无法获取"
-    echo "   💡 请先用 chromium-browser 登录 bilibili.com"
-else
-    COOKIE_AGE=$(ls -lu "$HOME/snap/chromium/common/chromium/Default/Cookies" 2>/dev/null | awk '{print $6, $7}')
-    echo "   ℹ️  Cookie最后使用: $COOKIE_AGE（约30天过期）"
-fi
-echo ""
-
-# ===== 获取视频元数据 =====
-VIDEO_INFO=$(yt-dlp "${COOKIE_ARGS[@]}" --dump-json "$VIDEO_URL" 2>/dev/null | head -1)
-
-if [ -z "$VIDEO_INFO" ]; then
-    VIDEO_INFO=$(yt-dlp --dump-json "$VIDEO_URL" 2>/dev/null | head -1)
-    if [ -z "$VIDEO_INFO" ]; then
-        echo "❌ 无法获取视频信息，请检查网络或链接是否正确"
-        exit 1
-    fi
-fi
-
-TITLE=$(echo "$VIDEO_INFO" | python3 -c "import sys, json; print(json.load(sys.stdin).get('title', '未知标题'))")
-AUTHOR=$(echo "$VIDEO_INFO" | python3 -c "import sys, json; print(json.load(sys.stdin).get('uploader', '未知作者'))")
-UPLOAD_DATE=$(echo "$VIDEO_INFO" | python3 -c "import sys, json; print(json.load(sys.stdin).get('upload_date', '未知时间'))")
-DURATION=$(echo "$VIDEO_INFO" | python3 -c "import sys, json; d=json.load(sys.stdin).get('duration', 0); print(f'{int(d//60)}分{int(d%60)}秒')")
-VIDEO_ID=$(echo "$VIDEO_INFO" | python3 -c "import sys, json; print(json.load(sys.stdin).get('id', ''))")
-
-if [ "$UPLOAD_DATE" != "未知时间" ]; then
-    UPLOAD_DATE_FORMATTED=$(echo "$UPLOAD_DATE" | sed 's/\(....\)\(..\)\(..\)/\1-\2-\3/')
-else
-    UPLOAD_DATE_FORMATTED="$UPLOAD_DATE"
-fi
-
-echo "📹 视频: $TITLE"
-echo "👤 作者: $AUTHOR"
-echo "📅 发布: $UPLOAD_DATE_FORMATTED"
-echo "⏱️  时长: $DURATION"
-
-# ===== 检查字幕 =====
-echo ""
-echo "🔍 正在检查字幕..."
-SUB_CHECK=$(yt-dlp "${COOKIE_ARGS[@]}" --list-subs "$VIDEO_URL" 2>&1)
-
-HAS_CC_SUBS=false
-CC_SUB_LANG=""
-CC_SUB_LANG=$(echo "$SUB_CHECK" | awk '!/danmaku/ && !/ai-/ && /^[[:space:]]*(zh-CN|zh-TW|zh-Hans|zh-Hant|en|ja|ko|es|ar|pt|de|fr)($|[-[:space:]])/ {print $1; exit}')
-if [ -n "$CC_SUB_LANG" ]; then
-    HAS_CC_SUBS=true
-fi
-
-HAS_AI_SUBS=false
-AI_LANG=""
-for lang in "ai-zh" "ai-en" "ai-ja" "ai-kr" "ai-th" "ai-id" "ai-vi"; do
-    if echo "$SUB_CHECK" | grep -q "$lang"; then
-        HAS_AI_SUBS=true
-        AI_LANG="$lang"
-        break
-    fi
-done
-
-TRANSCRIPT_SOURCE=""
-TRANSCRIPT_TEXT=""
-
-# 第1级：人工CC字幕
-if [ "$HAS_CC_SUBS" = true ]; then
-    echo "✅ 发现人工CC字幕（$CC_SUB_LANG），优先下载..."
-
-    yt-dlp "${COOKIE_ARGS[@]}" --skip-download --write-subs --sub-langs "$CC_SUB_LANG" --convert-subs srt \
-        -o "${OUTPUT_DIR}/bilibili_subtitle.%(ext)s" "$VIDEO_URL" 2>&1
-
-    SUB_FILE=$(find "$OUTPUT_DIR" -maxdepth 1 -name "bilibili_subtitle*.srt" -type f 2>/dev/null | head -1)
-
-    if [ -n "$SUB_FILE" ] && [ -s "$SUB_FILE" ]; then
-        echo "✅ CC字幕下载成功"
-        TRANSCRIPT_SOURCE="B站CC字幕"
-        TRANSCRIPT_TEXT=$(sed '/^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/d' "$SUB_FILE" | sed '/^[0-9]*$/d' | sed '/^$/d')
-    else
-        echo "⚠️  CC字幕下载失败..."
-        HAS_CC_SUBS=false
-    fi
-fi
-
-# 第2级：AI字幕
-if [ -z "$TRANSCRIPT_TEXT" ] && [ "$HAS_AI_SUBS" = true ]; then
-    echo "✅ 发现AI字幕（$AI_LANG），正在下载..."
-
-    yt-dlp "${COOKIE_ARGS[@]}" --skip-download --write-subs --write-auto-subs --sub-langs "$AI_LANG" --convert-subs srt \
-        -o "${OUTPUT_DIR}/bilibili_ai_subtitle.%(ext)s" "$VIDEO_URL" 2>&1
-
-    SUB_FILE=$(find "$OUTPUT_DIR" -maxdepth 1 -name "bilibili_ai_subtitle*.srt" -type f 2>/dev/null | head -1)
-
-    if [ -n "$SUB_FILE" ] && [ -s "$SUB_FILE" ]; then
-        echo "✅ AI字幕下载成功"
-        TRANSCRIPT_SOURCE="B站AI字幕 ($AI_LANG)"
-        TRANSCRIPT_TEXT=$(sed '/^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/d' "$SUB_FILE" | sed '/^[0-9]*$/d' | sed '/^$/d')
-    else
-        echo "⚠️  AI字幕下载失败..."
-        HAS_AI_SUBS=false
-    fi
-fi
-
-# 第2.5级：兜底 - 尝试直接下载AI字幕（解决 yt-dlp 列表检测不到的 AI 字幕）
-if [ -z "$TRANSCRIPT_TEXT" ]; then
-    echo "🔍 尝试直接下载 AI 字幕（兜底）..."
-    for try_lang in "ai-zh" "ai-en" "ai-ja"; do
-        yt-dlp "${COOKIE_ARGS[@]}" --skip-download --write-subs --write-auto-subs --sub-langs "$try_lang" --convert-subs srt \
-            -o "${OUTPUT_DIR}/bilibili_ai_subtitle.%(ext)s" "$VIDEO_URL" 2>/dev/null
-        SUB_FILE=$(find "$OUTPUT_DIR" -maxdepth 1 -name "bilibili_ai_subtitle*.srt" -type f 2>/dev/null | head -1)
-        if [ -n "$SUB_FILE" ] && [ -s "$SUB_FILE" ]; then
-            echo "✅ 兜底成功！AI字幕已下载（$try_lang）"
-            TRANSCRIPT_SOURCE="B站AI字幕 ($try_lang)"
-            TRANSCRIPT_TEXT=$(sed '/^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/d' "$SUB_FILE" | sed '/^[0-9]*$/d' | sed '/^$/d')
-            break
+        if [ -f "$BILI_COOKIE_FILE" ]; then
+            echo "   ✅ 使用 Cookie 文件: $BILI_COOKIE_FILE"
+            COOKIE_ARGS=(--cookies "$BILI_COOKIE_FILE")
+            return
+        else
+            echo "   ⚠️  Cookie 文件不存在: $BILI_COOKIE_FILE"
         fi
-    done
-fi
-
-# 第3级：Qwen3-ASR 本地语音转文字
-# 有独显 → Qwen3-ASR-1.7B（自动检测 CUDA/ROCm/MPS）
-# 无独显 → Qwen3-ASR-0.6B（CPU）
-if [ -z "$TRANSCRIPT_TEXT" ]; then
-    echo "🎤 未发现字幕，使用 Qwen3-ASR 本地语音转文字..."
-    echo "⏳ 这可能需要一些时间，请耐心等待..."
-
-    # 下载音频
-    echo "   ⬇️ 下载音频..."
-    yt-dlp "${COOKIE_ARGS[@]}" -x --audio-format mp3 -o "${OUTPUT_DIR}/bilibili_audio.%(ext)s" "$VIDEO_URL" 2>&1 || \
-    yt-dlp -x --audio-format mp3 -o "${OUTPUT_DIR}/bilibili_audio.%(ext)s" "$VIDEO_URL" 2>&1
-
-    AUDIO_FILE=$(find "$OUTPUT_DIR" -maxdepth 1 \( -name "bilibili_audio*.mp3" -o -name "bilibili_audio*.m4a" \) 2>/dev/null | head -1)
-
-    if [ -z "$AUDIO_FILE" ]; then
-        echo "❌ 音频下载失败"
-        exit 1
     fi
 
-    # 转为 16kHz 单声道 WAV（统一格式，兼容性最好）
-    echo "   🔄 音频格式优化（16kHz 单声道）..."
-    WAV_FILE="${OUTPUT_DIR}/bilibili_audio.wav"
-    ffmpeg -y -i "$AUDIO_FILE" -ar 16000 -ac 1 "$WAV_FILE" 2>/dev/null
-
-    if [ -f "$WAV_FILE" ] && [ -s "$WAV_FILE" ]; then
-        AUDIO_FILE="$WAV_FILE"
-        echo "   ✅ 音频已优化"
+    # 检测操作系统以选择正确的浏览器 Cookie 路径
+    local os_type="linux"
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        os_type="macos"
+    elif [[ -d "/mnt/c/Users" ]]; then
+        os_type="wsl"
     fi
 
-    # 调用 Qwen3-ASR 转录
-    # Python 脚本自动检测设备、自动选择模型（1.7B/0.6B）
-    Q3_DIR="$(cd "$(dirname "$0")" && pwd)"
-    Q3_SCRIPT="${Q3_DIR}/qwen3_transcribe.py"
-    Q3_PYTHON="${Q3_DIR}/../.venv/bin/python3"
-    Q3_OUTPUT_FILE="${OUTPUT_DIR}/.qwen_transcript.txt"
+    case "$BROWSER_TYPE" in
+        chrome)
+            if [ "$os_type" = "macos" ]; then
+                detect_cookie "chrome" "$HOME/Library/Application Support/Google/Chrome" "macOS Chrome" || true
+            fi
+            ;;
+        chromium)
+            if [ "$os_type" = "macos" ]; then
+                detect_cookie "chromium" "$HOME/Library/Application Support/Chromium" "macOS Chromium" || true
+            else
+                detect_cookie "chromium" "$HOME/snap/chromium/common/chromium" "WSL Chromium" || true
+            fi
+            ;;
+        edge)
+            if [ "$os_type" = "macos" ]; then
+                detect_cookie "edge" "$HOME/Library/Application Support/Microsoft Edge" "macOS Edge" || true
+            elif [ "$os_type" = "wsl" ]; then
+                local win_user
+                win_user=$(ls /mnt/c/Users/ 2>/dev/null | grep -v "Public\|Default\|All Users" | head -1)
+                if [ -n "$win_user" ]; then
+                    detect_cookie "edge" "C:/Users/$win_user/AppData/Local/Microsoft/Edge/User Data" "Windows Edge" || true
+                fi
+            fi
+            ;;
+        safari)
+            if [ "$os_type" = "macos" ]; then
+                detect_cookie "safari" "$HOME/Library/Safari" "macOS Safari" || true
+            fi
+            ;;
+        firefox)
+            if [ "$os_type" = "macos" ]; then
+                detect_cookie "firefox" "$HOME/Library/Application Support/Firefox" "macOS Firefox" || true
+            else
+                detect_cookie "firefox" "$HOME/snap/firefox/common/.mozilla/firefox" "WSL Firefox" || true
+            fi
+            ;;
+    esac
 
-    if [ ! -f "$Q3_PYTHON" ]; then
-        echo "   ❌ 未找到虚拟环境 Python"
-        echo "   请先执行以下命令安装依赖:"
-        echo "     cd ${Q3_DIR}/.."
-        echo "     python3 -m venv .venv"
-        echo "     .venv/bin/pip install qwen-asr"
-        exit 1
+    # 首次未找到，尝试所有已知浏览器（按平台）
+    if [ ${#COOKIE_ARGS[@]} -eq 0 ]; then
+        if [ "$os_type" = "macos" ]; then
+            detect_cookie "chrome" "$HOME/Library/Application Support/Google/Chrome" "macOS Chrome" || \
+            detect_cookie "chromium" "$HOME/Library/Application Support/Chromium" "macOS Chromium" || \
+            detect_cookie "edge" "$HOME/Library/Application Support/Microsoft Edge" "macOS Edge" || \
+            detect_cookie "firefox" "$HOME/Library/Application Support/Firefox" "macOS Firefox" || \
+            detect_cookie "safari" "$HOME/Library/Safari" "macOS Safari" || true
+        else
+            detect_cookie "chromium" "$HOME/snap/chromium/common/chromium" "WSL Chromium" || \
+            { local win_user; win_user=$(ls /mnt/c/Users/ 2>/dev/null | grep -v "Public\|Default\|All Users" | head -1); \
+              [ -n "$win_user" ] && detect_cookie "edge" "C:/Users/$win_user/AppData/Local/Microsoft/Edge/User Data" "Windows Edge"; } || \
+            detect_cookie "firefox" "$HOME/snap/firefox/common/.mozilla/firefox" "WSL Firefox" || true
+        fi
+    fi
+}
+
+to_safe_name() {
+    python3 -c "import sys, re; s=sys.stdin.read().strip(); s=re.sub(r'[\\\\/:*?\"<>|]', '', s); s=re.sub(r'[\s\W]+', '-', s); s=re.sub(r'-+', '-', s).strip('-'); print(s[:60] or 'untitled')"
+}
+
+to_simplified() {
+    if [ "$ENABLE_OPENCC" = "true" ] && command -v opencc >/dev/null 2>&1; then
+        opencc -c tw2s
+    else
+        cat
+    fi
+}
+
+run_asr_transcribe() {
+    local audio_file="$1"
+    local output_file="$2"
+    local engine="${ASR_ENGINE:-qwen3}"
+
+    export HF_HOME="$MODEL_CACHE_DIR"
+
+    local transcribe_py="$(get_python)"
+
+    if [ "$engine" = "whisper" ]; then
+        # === Whisper (MLX) ===
+        local wh_script="$SCRIPT_DIR/whisper_transcribe.py"
+        if [ ! -f "$wh_script" ]; then
+            echo "   ❌ 未找到 whisper_transcribe.py"
+            return 1
+        fi
+
+        local model_path="${ASR_LOCAL_MODEL:-}"
+        if [ -z "$model_path" ]; then
+            echo "   ❌ 请在 env.local 中设置 ASR_LOCAL_MODEL 指向 Whisper 模型路径"
+            return 1
+        fi
+        if [[ "$model_path" != /* ]]; then
+            model_path="$PROJECT_DIR/$model_path"
+        fi
+        if [ ! -d "$model_path" ]; then
+            echo "   ❌ Whisper 模型路径不存在: $model_path"
+            return 1
+        fi
+
+        echo "   🎤 Whisper (MLX): $model_path"
+        if [ "$transcribe_py" = "conda" ]; then
+            conda run -n "$CONDA_ENV" python3 "$wh_script" --audio "$audio_file" --output-file "$output_file" --model-path "$model_path"
+        else
+            "$transcribe_py" "$wh_script" --audio "$audio_file" --output-file "$output_file" --model-path "$model_path"
+        fi
+
+    else
+        # === Qwen3-ASR（默认） ===
+        export ASR_LOCAL_MODEL="${ASR_LOCAL_MODEL:-}"
+        local q3_script="$SCRIPT_DIR/qwen3_transcribe.py"
+        local extra_args=()
+
+        if [ -n "${ASR_LOCAL_MODEL:-}" ]; then
+            local resolved_model="$ASR_LOCAL_MODEL"
+            if [[ "$resolved_model" != /* ]]; then
+                resolved_model="$PROJECT_DIR/$resolved_model"
+            fi
+            if [ -d "$resolved_model" ]; then
+                extra_args=(--local-model "$resolved_model")
+                echo "   🎤 使用本地模型: $resolved_model"
+            fi
+        fi
+        if [ "${FORCE_ASR_CPU:-false}" = "true" ]; then
+            extra_args+=(--force-cpu)
+        fi
+
+        if [ "$transcribe_py" = "conda" ]; then
+            conda run -n "$CONDA_ENV" python3 "$q3_script" --audio "$audio_file" --output-file "$output_file" "${extra_args[@]}"
+        else
+            "$transcribe_py" "$q3_script" --audio "$audio_file" --output-file "$output_file" "${extra_args[@]}"
+        fi
+    fi
+}
+
+# ===== 单个视频转录（B站 URL） =====
+transcribe_bilibili_url() {
+    local url="$1"
+
+    echo "🔍 正在获取视频信息..."
+
+    get_cookie_args
+
+    if [ ${#COOKIE_ARGS[@]} -eq 0 ]; then
+        echo "   ⚠️ 无可用Cookie，B站AI字幕可能无法获取"
+        echo "   💡 请先用浏览器登录 bilibili.com"
+        echo "      macOS: Chrome / Chromium / Edge / Safari / Firefox"
+        echo "      Linux: chromium-browser"
+    else
+        local cookie_age
+        local cp
+        for cp in \
+            "$HOME/Library/Application Support/Google/Chrome/Default/Cookies" \
+            "$HOME/Library/Application Support/Chromium/Default/Cookies" \
+            "$HOME/Library/Application Support/Microsoft Edge/Default/Cookies" \
+            "$HOME/snap/chromium/common/chromium/Default/Cookies"; do
+            if [ -f "$cp" ]; then
+                cookie_age=$(ls -lu "$cp" 2>/dev/null | awk '{print $6, $7}')
+                [ -n "$cookie_age" ] && echo "   ℹ️  Cookie最后使用: $cookie_age（约30天过期）"
+                break
+            fi
+        done
+    fi
+    echo ""
+
+    # 获取视频元数据
+    local video_info
+    video_info=$(yt-dlp "${COOKIE_ARGS[@]}" --dump-json "$url" 2>/dev/null | head -1)
+
+    if [ -z "$video_info" ]; then
+        video_info=$(yt-dlp --dump-json "$url" 2>/dev/null | head -1)
+        if [ -z "$video_info" ]; then
+            echo "❌ 无法获取视频信息，请检查网络或链接是否正确"
+            return 1
+        fi
     fi
 
+    extract_json() {
+        echo "$video_info" | python3 -c "import sys, json; print(json.load(sys.stdin).get('$1', '$2'))"
+    }
+
+    local TITLE;       TITLE=$(extract_json "title" "未知标题")
+    local AUTHOR;      AUTHOR=$(extract_json "uploader" "未知作者")
+    local UPLOAD_DATE; UPLOAD_DATE=$(extract_json "upload_date" "未知时间")
+    local DURATION_SEC;DURATION_SEC=$(extract_json "duration" "0")
+    local VIDEO_ID;    VIDEO_ID=$(extract_json "id" "")
+
+    # duration 字段可能是浮点数，bash 算术不支持小数，先取整
+    DURATION_SEC=$(printf "%.0f" "$DURATION_SEC" 2>/dev/null || echo "0")
+    local DURATION="$((DURATION_SEC / 60))分$((DURATION_SEC % 60))秒"
+
+    local UPLOAD_DATE_FORMATTED="$UPLOAD_DATE"
+    if [ "$UPLOAD_DATE" != "未知时间" ]; then
+        UPLOAD_DATE_FORMATTED=$(echo "$UPLOAD_DATE" | sed 's/\(....\)\(..\)\(..\)/\1-\2-\3/')
+    fi
+
+    echo "📹 视频: $TITLE"
+    echo "👤 作者: $AUTHOR"
+    echo "📅 发布: $UPLOAD_DATE_FORMATTED"
+    echo "⏱️  时长: $DURATION"
+
+    # ===== 三级降级转录 =====
+    echo ""
+
+    # 初始化（FORCE_ASR=true 时也需要）
+    local HAS_CC_SUBS=false CC_SUB_LANG=""
+    local HAS_AI_SUBS=false AI_LANG=""
+
+    if [ "$FORCE_ASR" = "true" ]; then
+        echo "⚡ FORCE_ASR=true，跳过字幕检测，直接使用 Qwen3-ASR 本地转录"
+    else
+        echo "🔍 正在检查字幕..."
+
+        local SUB_CHECK
+        SUB_CHECK=$(yt-dlp "${COOKIE_ARGS[@]}" --list-subs "$url" 2>&1)
+
+        CC_SUB_LANG=$(echo "$SUB_CHECK" | awk '!/danmaku/ && !/ai-/ && /^[[:space:]]*(zh-CN|zh-TW|zh-Hans|zh-Hant|en|ja|ko|es|ar|pt|de|fr)($|[-[:space:]])/ {print $1; exit}')
+        [ -n "$CC_SUB_LANG" ] && HAS_CC_SUBS=true
+
+        for lang in "ai-zh" "ai-en" "ai-ja" "ai-kr" "ai-th" "ai-id" "ai-vi"; do
+            if echo "$SUB_CHECK" | grep -q "$lang"; then
+                HAS_AI_SUBS=true
+                AI_LANG="$lang"
+                break
+            fi
+        done
+    fi
+
+    local TRANSCRIPT_SOURCE=""
+    local TRANSCRIPT_TEXT=""
+
+    # 第1级：人工CC字幕
+    if [ "$HAS_CC_SUBS" = true ] && [ "$FORCE_ASR" != "true" ]; then
+        echo "✅ 发现人工CC字幕（$CC_SUB_LANG），优先下载..."
+        yt-dlp "${COOKIE_ARGS[@]}" --skip-download --write-subs --sub-langs "$CC_SUB_LANG" --convert-subs srt \
+            -o "${CACHE_DIR}/bilibili_subtitle.%(ext)s" "$url" 2>&1
+
+        local sub_file
+        sub_file=$(find "$CACHE_DIR" -maxdepth 1 -name "bilibili_subtitle*.srt" -type f 2>/dev/null | head -1)
+
+        if [ -n "$sub_file" ] && [ -s "$sub_file" ]; then
+            echo "✅ CC字幕下载成功"
+            TRANSCRIPT_SOURCE="B站CC字幕"
+            TRANSCRIPT_TEXT=$(sed '/^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/d' "$sub_file" | sed '/^[0-9]*$/d' | sed '/^$/d')
+        else
+            echo "⚠️  CC字幕下载失败..."
+            HAS_CC_SUBS=false
+        fi
+    fi
+
+    # 第2级：AI字幕
+    if [ -z "$TRANSCRIPT_TEXT" ] && [ "$HAS_AI_SUBS" = true ] && [ "$FORCE_ASR" != "true" ]; then
+        echo "✅ 发现AI字幕（$AI_LANG），正在下载..."
+        yt-dlp "${COOKIE_ARGS[@]}" --skip-download --write-subs --write-auto-subs --sub-langs "$AI_LANG" --convert-subs srt \
+            -o "${CACHE_DIR}/bilibili_ai_subtitle.%(ext)s" "$url" 2>&1
+
+        local sub_file
+        sub_file=$(find "$CACHE_DIR" -maxdepth 1 -name "bilibili_ai_subtitle*.srt" -type f 2>/dev/null | head -1)
+
+        if [ -n "$sub_file" ] && [ -s "$sub_file" ]; then
+            echo "✅ AI字幕下载成功"
+            TRANSCRIPT_SOURCE="B站AI字幕 ($AI_LANG)"
+            TRANSCRIPT_TEXT=$(sed '/^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/d' "$sub_file" | sed '/^[0-9]*$/d' | sed '/^$/d')
+        else
+            echo "⚠️  AI字幕下载失败..."
+            HAS_AI_SUBS=false
+        fi
+    fi
+
+    # 第2.5级：AI字幕兜底（FORCE_ASR 模式下跳过）
+    if [ -z "$TRANSCRIPT_TEXT" ] && [ "$FORCE_ASR" != "true" ]; then
+        echo "🔍 尝试直接下载 AI 字幕（兜底）..."
+        for try_lang in "ai-zh" "ai-en" "ai-ja"; do
+            yt-dlp "${COOKIE_ARGS[@]}" --skip-download --write-subs --write-auto-subs --sub-langs "$try_lang" --convert-subs srt \
+                -o "${CACHE_DIR}/bilibili_ai_subtitle.%(ext)s" "$url" 2>/dev/null
+            local sub_file
+            sub_file=$(find "$CACHE_DIR" -maxdepth 1 -name "bilibili_ai_subtitle*.srt" -type f 2>/dev/null | head -1)
+            if [ -n "$sub_file" ] && [ -s "$sub_file" ]; then
+                echo "✅ 兜底成功！AI字幕已下载（$try_lang）"
+                TRANSCRIPT_SOURCE="B站AI字幕 ($try_lang)"
+                TRANSCRIPT_TEXT=$(sed '/^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/d' "$sub_file" | sed '/^[0-9]*$/d' | sed '/^$/d')
+                break
+            fi
+        done
+    fi
+
+    # 第3级：Qwen3-ASR
+    if [ -z "$TRANSCRIPT_TEXT" ]; then
+        echo "🎤 未发现字幕，使用 Qwen3-ASR 本地语音转文字..."
+        echo "⏳ 这可能需要一些时间，请耐心等待..."
+
+        echo "   ⬇️ 下载音频..."
+        yt-dlp "${COOKIE_ARGS[@]}" -x --audio-format mp3 -o "${CACHE_DIR}/bilibili_audio.%(ext)s" "$url" 2>&1 || \
+        yt-dlp -x --audio-format mp3 -o "${CACHE_DIR}/bilibili_audio.%(ext)s" "$url" 2>&1
+
+        local audio_file
+        audio_file=$(find "$CACHE_DIR" -maxdepth 1 \( -name "bilibili_audio*.mp3" -o -name "bilibili_audio*.m4a" \) 2>/dev/null | head -1)
+
+        if [ -z "$audio_file" ]; then
+            echo "❌ 音频下载失败"
+            return 1
+        fi
+
+        echo "   🔄 音频格式优化（16kHz 单声道）..."
+        local wav_file="${CACHE_DIR}/bilibili_audio.wav"
+        ffmpeg -y -i "$audio_file" -ar 16000 -ac 1 "$wav_file" 2>/dev/null
+
+        if [ -f "$wav_file" ] && [ -s "$wav_file" ]; then
+            audio_file="$wav_file"
+            echo "   ✅ 音频已优化"
+        fi
+
+        local q3_output="${CACHE_DIR}/.qwen_transcript.txt"
+        echo "   🎤 开始语音转文字..."
+        run_asr_transcribe "$audio_file" "$q3_output"
+
+        if [ -f "$q3_output" ] && [ -s "$q3_output" ]; then
+            TRANSCRIPT_SOURCE=$(head -1 "$q3_output")
+            TRANSCRIPT_TEXT=$(tail -n +2 "$q3_output")
+            rm -f "$q3_output"
+            echo "✅ 转录完成"
+        else
+            echo "❌ Qwen3-ASR 转录失败"
+            rm -f "$q3_output"
+            return 1
+        fi
+    fi
+
+    # 繁体转简体
+    TRANSCRIPT_TEXT_SIMPLIFIED=$(echo "$TRANSCRIPT_TEXT" | to_simplified)
+
+    # 按发布年月组织输出目录（YYYY-MM 格式）
+    local PUB_YEAR; PUB_YEAR=$(echo "$UPLOAD_DATE_FORMATTED" | cut -d'-' -f1)
+    local PUB_MONTH; PUB_MONTH=$(echo "$UPLOAD_DATE_FORMATTED" | cut -d'-' -f2)
+    local final_outdir="$OUTPUT_DIR"
+    if [ -n "$PUB_YEAR" ] && [ "$PUB_YEAR" != "未知时间" ]; then
+        final_outdir="${OUTPUT_DIR}/${PUB_YEAR}-${PUB_MONTH}"
+        mkdir -p "$final_outdir"
+    fi
+
+    local SAFE_TITLE;  SAFE_TITLE=$(echo "$TITLE" | to_safe_name)
+    local AUTHOR_SAFE; AUTHOR_SAFE=$(echo "$AUTHOR" | to_safe_name)
+    local OUTPUT_FILE="${final_outdir}/${SAFE_TITLE}_${AUTHOR_SAFE}_${UPLOAD_DATE_FORMATTED}_${VIDEO_ID}.md"
+
+    write_output_file "$OUTPUT_FILE" "$TITLE" "$url" "$AUTHOR" "$UPLOAD_DATE_FORMATTED" "$DURATION" "$TRANSCRIPT_SOURCE" "$TRANSCRIPT_TEXT_SIMPLIFIED"
+
+    echo ""
+    echo "✅ 转录完成！"
+    echo "📄 文件已保存: $OUTPUT_FILE"
+    echo "$OUTPUT_FILE"
+}
+
+# ===== 本地文件转录 =====
+transcribe_local_file() {
+    local file_path="$1"
+    local filename
+    filename=$(basename "$file_path")
+
+    echo "🎬 本地文件: $filename"
+
+    # 提取音频（如果是视频文件）
+    local ext="${filename##*.}"
+    ext=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
+    local video_exts="mp4 mkv avi mov webm flv wmv ts"
+
+    local audio_input="$file_path"
+
+    if echo "$video_exts" | grep -qw "$ext"; then
+        echo "   🎬 检测到视频格式，提取音频..."
+        local audio_out="${CACHE_DIR}/local_audio_$$.wav"
+        ffmpeg -y -i "$file_path" -vn -ar 16000 -ac 1 "$audio_out" 2>/dev/null
+        if [ -f "$audio_out" ] && [ -s "$audio_out" ]; then
+            audio_input="$audio_out"
+            echo "   ✅ 音频已提取"
+        else
+            echo "   ⚠️  ffmpeg 提取音频失败，尝试直接输入"
+        fi
+    elif [ "$ext" = "wav" ]; then
+        # 检查是否需要重新采样
+        local sample_rate
+        sample_rate=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of default=noprint_wrappers=1:nokey=1 "$file_path" 2>/dev/null)
+        local channels
+        channels=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels -of default=noprint_wrappers=1:nokey=1 "$file_path" 2>/dev/null)
+        if [ "$sample_rate" != "16000" ] || [ "$channels" != "1" ]; then
+            echo "   🔄 音频格式优化（16kHz 单声道）..."
+            local wav_out="${CACHE_DIR}/local_audio_$$.wav"
+            ffmpeg -y -i "$file_path" -ar 16000 -ac 1 "$wav_out" 2>/dev/null
+            if [ -f "$wav_out" ] && [ -s "$wav_out" ]; then
+                audio_input="$wav_out"
+                echo "   ✅ 音频已优化"
+            fi
+        fi
+    else
+        # 其他音频格式统一转换
+        echo "   🔄 音频格式优化（16kHz 单声道）..."
+        local wav_out="${CACHE_DIR}/local_audio_$$.wav"
+        ffmpeg -y -i "$file_path" -ar 16000 -ac 1 "$wav_out" 2>/dev/null
+        if [ -f "$wav_out" ] && [ -s "$wav_out" ]; then
+            audio_input="$wav_out"
+            echo "   ✅ 音频已优化"
+        fi
+    fi
+
+    # Qwen3-ASR 转录
     echo "   🎤 开始语音转文字..."
-    "$Q3_PYTHON" "$Q3_SCRIPT" --audio "$AUDIO_FILE" --output-file "$Q3_OUTPUT_FILE"
+    local q3_output="${CACHE_DIR}/.qwen_transcript.txt"
+    run_asr_transcribe "$audio_input" "$q3_output"
 
-    if [ -f "$Q3_OUTPUT_FILE" ] && [ -s "$Q3_OUTPUT_FILE" ]; then
-        # 输出文件格式：
-        #   第一行：转录来源（如 "Qwen3-ASR-1.7B（GPU加速）"）
-        #   第二行起：完整转录文本
-        TRANSCRIPT_SOURCE=$(head -1 "$Q3_OUTPUT_FILE")
-        TRANSCRIPT_TEXT=$(tail -n +2 "$Q3_OUTPUT_FILE")
-        rm -f "$Q3_OUTPUT_FILE"
-        echo "✅ 转录完成"
-    else
+    if [ ! -f "$q3_output" ] || [ ! -s "$q3_output" ]; then
         echo "❌ Qwen3-ASR 转录失败"
-        rm -f "$Q3_OUTPUT_FILE"
+        rm -f "$q3_output"
+        return 1
+    fi
+
+    local TRANSCRIPT_SOURCE; TRANSCRIPT_SOURCE=$(head -1 "$q3_output")
+    local TRANSCRIPT_TEXT;    TRANSCRIPT_TEXT=$(tail -n +2 "$q3_output")
+    rm -f "$q3_output"
+
+    # 繁体转简体
+    TRANSCRIPT_TEXT=$(echo "$TRANSCRIPT_TEXT" | to_simplified)
+
+    # 生成输出文件
+    local base_name="${filename%.*}"
+    local SAFE_NAME; SAFE_NAME=$(echo "$base_name" | to_safe_name)
+    local NOW; NOW=$(date '+%Y-%m-%d')
+    local LOCAL_OUT="${OUTPUT_DIR}/local"
+    mkdir -p "$LOCAL_OUT"
+    local OUTPUT_FILE="${LOCAL_OUT}/${SAFE_NAME}_${NOW}.md"
+
+    write_output_file "$OUTPUT_FILE" "$base_name" "file://$file_path" "本地文件" "$NOW" "未知" "$TRANSCRIPT_SOURCE" "$TRANSCRIPT_TEXT"
+
+    echo "   ✅ 转录完成 → $(basename "$OUTPUT_FILE")"
+    echo "$OUTPUT_FILE"
+}
+
+write_output_file() {
+    local out="$1" title="$2" link="$3" author="$4" date="$5" duration="$6" source="$7" text="$8"
+
+    cat > "$out" << EOF
+# $title
+
+> **链接**：$link
+> **作者**：$author
+> **发布时间**：$date
+> **视频时长**：$duration
+> **转录来源**：$source
+> **转录时间**：$(date '+%Y-%m-%d %H:%M:%S')
+
+---
+
+## 视频摘要
+
+【AI待处理：请设置 SUMMARY_API_KEY 后重新运行以生成结构化摘要】
+
+---
+
+## 思维导图
+
+【AI待处理：请设置 SUMMARY_API_KEY 后重新运行以生成思维导图】
+
+---
+
+## 完整原文
+
+$text
+
+---
+
+## AI校对
+
+【AI待处理：请设置 SUMMARY_API_KEY 后重新运行以生成校对版本】
+EOF
+}
+
+# ===== 主入口 =====
+
+# 模式：本地目录批量转录
+if [ -n "$LOCAL_DIR" ]; then
+    if [ ! -d "$LOCAL_DIR" ]; then
+        echo "❌ 目录不存在: $LOCAL_DIR"
         exit 1
     fi
+
+    echo "📁 扫描本地目录: $LOCAL_DIR"
+    echo ""
+
+    # 支持的媒体格式
+    patterns=(-name "*.mp4" -o -name "*.mkv" -o -name "*.avi" -o -name "*.mov" \
+              -o -name "*.webm" -o -name "*.flv" -o -name "*.wmv" -o -name "*.ts" \
+              -o -name "*.mp3" -o -name "*.m4a" -o -name "*.wav" -o -name "*.flac" \
+              -o -name "*.ogg" -o -name "*.opus" -o -name "*.aac")
+
+    files=$(find "$LOCAL_DIR" -maxdepth 1 -type f \( "${patterns[@]}" \) 2>/dev/null | sort)
+
+    if [ -z "$files" ]; then
+        echo "❌ 目录中没有找到支持的媒体文件"
+        echo "   支持格式: mp4, mkv, avi, mov, webm, flv, wmv, ts, mp3, m4a, wav, flac, ogg, opus, aac"
+        exit 1
+    fi
+
+    count=$(echo "$files" | wc -l | tr -d ' ')
+    echo "📊 找到 $count 个媒体文件"
+    echo ""
+
+    success=0 fail=0
+    while IFS= read -r f; do
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        if transcribe_local_file "$f"; then
+            success=$((success + 1))
+        else
+            fail=$((fail + 1))
+        fi
+    done <<< "$files"
+
+    echo ""
+    echo "================================================================================"
+    echo "📊 批量转录完成: 成功 $success 个, 失败 $fail 个"
+    echo "================================================================================"
+    exit $((fail > 0 ? 1 : 0))
 fi
 
-# 繁体转简体
-if command -v opencc >/dev/null 2>&1; then
-    echo "🔄 正在转换为简体字..."
-    TRANSCRIPT_TEXT_SIMPLIFIED=$(echo "$TRANSCRIPT_TEXT" | opencc -c tw2s)
-else
-    TRANSCRIPT_TEXT_SIMPLIFIED="$TRANSCRIPT_TEXT"
+# 模式：B站 URL 转录
+if [ -z "$VIDEO_URL" ]; then
+    echo "用法: $0 <B站视频链接> [选项]"
+    echo "       $0 --local-dir <目录路径> [选项]"
+    echo ""
+    echo "选项:"
+    echo "  --local-dir <目录>    批量转录本地目录中的媒体文件"
+    echo "  --output-dir <目录>   输出目录（默认: $OUTPUT_DIR）"
+    echo ""
+    echo "配置: 编辑项目根目录的 env.local 文件"
+    exit 1
 fi
 
-# 按发布年月组织输出目录
-PUB_YEAR=$(echo "$UPLOAD_DATE_FORMATTED" | cut -d'-' -f1)
-PUB_MONTH=$(echo "$UPLOAD_DATE_FORMATTED" | cut -d'-' -f2)
-if [ -n "$PUB_YEAR" ] && [ "$PUB_YEAR" != "未知时间" ]; then
-    OUTPUT_DIR="${OUTPUT_DIR}/${PUB_YEAR}/${PUB_MONTH}"
-    mkdir -p "$OUTPUT_DIR"
-fi
-
-SAFE_TITLE=$(echo "$TITLE" | python3 -c "import sys, re; s=sys.stdin.read().strip(); s=re.sub(r'[\\\\/:*?\"<>|]', '', s); s=re.sub(r'[\\s\\W]+', '-', s); s=re.sub(r'-+', '-', s).strip('-'); print(s[:60] or 'untitled')")
-AUTHOR_SAFE=$(echo "$AUTHOR" | python3 -c "import sys, re; s=sys.stdin.read().strip(); s=re.sub(r'[\\\\/:*?\"<>|]', '', s); s=re.sub(r'[\\s\\W]+', '-', s); s=re.sub(r'-+', '-', s).strip('-'); print(s[:30] or 'unknown')")
-OUTPUT_FILE="${OUTPUT_DIR}/${SAFE_TITLE}_${AUTHOR_SAFE}_${UPLOAD_DATE_FORMATTED}_${VIDEO_ID}.txt"
-
-echo "📝 正在生成转录文件..."
-
-cat > "$OUTPUT_FILE" << EOF
-================================================================================
-B站视频转录文档
-================================================================================
-
-📹 视频标题：$TITLE
-🔗 B站链接：$VIDEO_URL
-👤 作者：$AUTHOR
-📅 发布时间：$UPLOAD_DATE_FORMATTED
-⏱️  视频时长：$DURATION
-📝 转录来源：$TRANSCRIPT_SOURCE
-⏰ 转录时间：$(date '+%Y-%m-%d %H:%M:%S')
-
-================================================================================
-第一部分：视频摘要（AI生成）
-================================================================================
-
-【AI待处理：请阅读全文后，替换此行，写结构化摘要】
-
-================================================================================
-第二部分：完整原文
-================================================================================
-
-$TRANSCRIPT_TEXT_SIMPLIFIED
-
-================================================================================
-文档结束
-================================================================================
-EOF
-
-echo ""
-echo "✅ 转录完成！"
-echo "📄 文件已保存: $OUTPUT_FILE"
-echo "$OUTPUT_FILE"
+transcribe_bilibili_url "$VIDEO_URL"
