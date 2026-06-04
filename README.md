@@ -1,61 +1,100 @@
 # 📼 Bilibili Auto Transcript
 
-**B站视频自动转录 & 收藏夹扫描技能**
-
-三级降级策略：CC字幕 → B站AI字幕 → Qwen3-ASR 语音转文字，自动获取 B站视频的文字内容。
+B站视频转录 + 收藏夹扫描 + 本地文件转录。双引擎 ASR（Qwen3-ASR / Whisper MLX），LLM 三阶段后处理。
 
 ## 功能
 
-- **三级字幕降级**：人工CC字幕 → AI字幕(9种语言) → Qwen3-ASR 本地转录，逐级自动降级
-- **智能模型选择**：有独显自动用 Qwen3-ASR-1.7B，无独显自动用 Qwen3-ASR-0.6B
-- **收藏夹扫描**：分页获取收藏夹所有视频，去重、断点续传
-- **批量转录**：自动遍历收藏夹新视频，支持重试、报告生成
-- **AI摘要**（可选）：设置 `OPENAI_API_KEY` 后自动生成结构化视频摘要
-- **目录组织**：按视频发布年月自动分目录存储
+- **三模式转录**：B站单视频、收藏夹批量、本地文件目录
+- **三级字幕降级**（B站）：CC 字幕 → AI 字幕 → ASR 本地转录
+- **双引擎 ASR**：Qwen3-ASR（中文 CER ~3.8%）或 Whisper v3 Turbo（MLX 加速）
+- **LLM 后处理**：结构化摘要 + 思维导图 + AI 校对（领域术语检查）
+- **断点续传**：avid 去重，中断后自动跳过已处理视频
+- **Markdown 输出**：按发布日期分目录（`YYYY-MM/`），本地文件保存到 `local/`
+- **统一配置**：所有参数集中在 `env.local`，无需改代码
 
 ## 快速开始
 
 ```bash
-# 1. 安装依赖（首次）
-cd ~/.openclaw/workspace/skills/bilibili-auto-transcript
-python3 -m venv .venv
-.venv/bin/pip install qwen-asr requests
+# 1. 初始化配置
+cp env.example env.local
+# 编辑 env.local：填入 FAV_MEDIA_ID、LLM 配置等
 
-# 2. 手动转录单个视频
-bash scripts/bilibili_transcript.sh "https://www.bilibili.com/video/BVxxxxx/"
+# 2. 安装依赖
+conda activate course-whisper
+pip install qwen-asr requests torch   # Qwen3 引擎
+pip install mlx-whisper               # Whisper 引擎（Apple Silicon）
 
-# 3. 批量转录收藏夹所有新视频
-.venv/bin/python3 scripts/batch_transcribe.py
+# 3. 确认系统依赖
+yt-dlp --version && ffmpeg -version
+
+# 4. 运行
+python scripts/batch_transcribe.py                     # B站收藏夹
+python scripts/batch_transcribe.py --local-dir ./videos/  # 本地目录
+bash scripts/bilibili_transcript.sh "https://www.bilibili.com/video/BVxxxxx/"  # 单视频
 ```
-
-## 依赖
-
-- yt-dlp — 视频/字幕下载
-- ffmpeg — 音频处理
-- `.venv/` — 技能虚拟环境（内含 qwen-asr、requests）
-- opencc — 繁转简（可选）
-- chromium-browser — Cookie支持（B站AI字幕）
 
 ## 配置
 
-1. 编辑 `scripts/bilibili_scanner.py`，设置 `FAV_MEDIA_ID` 为你的B站收藏夹ID
-2. 用 chromium-browser 登录 bilibili.com 获取 Cookie
-3. （可选）设置 `OPENAI_API_KEY` 环境变量开启自动摘要
+编辑 `env.local`（参考 `env.example`），核心配置：
+
+```bash
+FAV_MEDIA_ID="your_id"                                        # B站收藏夹 ID
+ASR_ENGINE="whisper"                                          # qwen3 | whisper
+ASR_LOCAL_MODEL="/path/to/whisper-large-v3-turbo"             # 本地模型路径
+FORCE_ASR="true"                                              # 跳过 B站字幕，直接本地转录
+SUMMARY_API_KEY="lm-studio"                                   # LLM API Key
+SUMMARY_API_URL="http://127.0.0.1:1234/v1"                    # LM Studio / Ollama
+SUMMARY_MODEL="qwen3.6-27b-ud-mlx"
+```
+
+完整配置说明见 [docs/config.md](docs/config.md)。
+
+## 输出示例
+
+```markdown
+# 视频标题
+> **链接**：...  **作者**：...  **转录来源**：Whisper-v3-turbo（MLX加速）
+
+## 视频摘要
+（LLM 生成：核心观点 + 主要论点 + 关键结论）
+
+## 思维导图
+（LLM 生成：缩进列表层次结构）
+
+## 完整原文
+（转录全文）
+
+## AI校对
+（LLM 校对：修正错别字 + 断句优化 + 术语检查）
+```
 
 ## 项目结构
 
 ```
 bilibili-auto-transcript/
-├── SKILL.md                    # Skill 元数据
+├── env.example                  # 配置模板
+├── env.local                    # 本地配置（不提交）
+├── docs/                        # 项目文档
 ├── scripts/
-│   ├── bilibili_scanner.py     # 收藏夹扫描
-│   ├── bilibili_transcript.sh  # 核心转录引擎
-│   ├── qwen3_transcribe.py     # Qwen3-ASR 转录辅助
-│   └── batch_transcribe.py     # 批量转录调度
-└── references/
-    ├── architecture.md         # 架构说明
-    └── bilibili-fav-api.md     # B站API参考
+│   ├── bilibili_transcript.sh   # 转录引擎
+│   ├── bilibili_scanner.py      # 收藏夹扫描
+│   ├── qwen3_transcribe.py      # Qwen3-ASR
+│   ├── whisper_transcribe.py    # Whisper MLX
+│   └── batch_transcribe.py      # 批量调度
+├── cache/audio/                 # 音频缓存
+└── models/                      # ASR 模型权重
 ```
+
+## 依赖
+
+| 工具 | 用途 |
+|------|------|
+| yt-dlp | 视频/字幕/音频下载 |
+| ffmpeg | 音频格式转换 |
+| qwen-asr / mlx-whisper | ASR 引擎（二选一） |
+| torch | Qwen3 推理后端 |
+| requests | HTTP 请求 |
+| opencc | 繁转简（可选） |
 
 ## 许可
 
