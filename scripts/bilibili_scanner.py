@@ -50,6 +50,9 @@ def _expand_path(raw):
 STATE_DIR = _expand_path(
     _env.get("STATE_DIR", "~/.openclaw/workspace/.auto-transcript-state")
 )
+OUTPUT_DIR = _expand_path(
+    _env.get("OUTPUT_DIR", "~/workspace/knowledge/bilibili")
+)
 COOKIE_FILE = _expand_path(
     _env.get("BILI_COOKIE_FILE", "")
 )
@@ -134,6 +137,30 @@ def fetch_all_medias():
     return all_medias
 
 
+def _find_existing_ids():
+    """扫描输出目录，找出已有 .md 文件对应的视频 ID。
+
+    输出文件名格式: {title}_{author}_{date}_{video_id}.md
+    video_id 可能是 avid（纯数字）或 bvid（BV 开头），双向收集。
+    返回 (avid_set, bvid_set) 两集合，调用方取并集匹配。
+    """
+    avids = set()
+    bvids = set()
+    if not os.path.isdir(OUTPUT_DIR):
+        return avids, bvids
+    for root, _dirs, files in os.walk(OUTPUT_DIR):
+        for f in files:
+            if not f.endswith(".md"):
+                continue
+            base = f[:-3]  # 去掉 .md
+            last_seg = base.rsplit("_", 1)[-1]
+            if last_seg.isdigit():
+                avids.add(last_seg)
+            elif last_seg.upper().startswith("BV"):
+                bvids.add(last_seg)
+    return avids, bvids
+
+
 def main():
     if not FAV_MEDIA_ID:
         print("ERROR: 请先设置收藏夹ID！编辑项目根目录的 env.local，设置 FAV_MEDIA_ID")
@@ -145,26 +172,35 @@ def main():
     medias = fetch_all_medias()
     print(f"COLLECTION_TOTAL:{len(medias)}")
 
-    # 加载已处理记录
-    processed = set()
+    # 扫描输出目录中已有的 .md 文件，提取 avid/bvid
+    disk_avids, disk_bvids = _find_existing_ids()
+
+    # 合并三处来源：文本记录（avid）+ 磁盘 avid + 磁盘 bvid
+    text_processed = set()
     if os.path.exists(PROCESSED_FILE):
         with open(PROCESSED_FILE) as f:
-            processed = set(line.strip() for line in f if line.strip())
-    print(f"PROCESSED:{len(processed)}")
+            text_processed = set(line.strip() for line in f if line.strip())
 
-    # 找出新视频
+    processed = text_processed | disk_avids
+    disk_bvids_only = disk_bvids - processed  # 还没有被 avid 覆盖到的 bvid
+    total_disk = len(disk_avids) + len(disk_bvids_only)
+    print(f"PROCESSED:{len(processed)} (text:{len(text_processed)}, disk:{total_disk})")
+
+    # 找出新视频：avid 不在去重集合中，且 bvid 也不在磁盘 bvid 集合中
     new_videos = []
     for m in medias:
         avid = str(m["id"])
-        if avid not in processed:
-            new_videos.append({
-                "avid": avid,
-                "bvid": m.get("bvid", "") or m.get("bv_id", ""),
-                "title": m["title"],
-                "duration": m["duration"],
-                "upper": m["upper"]["name"],
-                "pubtime": m.get("pubtime", 0),
-            })
+        bvid = m.get("bvid", "") or m.get("bv_id", "")
+        if avid in processed or bvid in disk_bvids:
+            continue
+        new_videos.append({
+            "avid": avid,
+            "bvid": bvid,
+            "title": m["title"],
+            "duration": m["duration"],
+            "upper": m["upper"]["name"],
+            "pubtime": m.get("pubtime", 0),
+        })
 
     if not new_videos:
         print("ALL_CAUGHT_UP")

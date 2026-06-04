@@ -87,16 +87,17 @@ ffmpeg 转 16kHz 单声道 WAV（统一格式，兼容性最佳）
 
 ## 三、本地文件转录模式（v5.0 新增）
 
-当传入 `--local-dir <目录>` 时，脚本跳过 B站 API 和字幕检测，直接进入 Qwen3-ASR 语音转文字流程。
+当传入 `--local-dir <目录>` 时，脚本跳过 B站 API 和字幕检测，直接进入 ASR 语音转文字流程。结果保存到 `OUTPUT_DIR/local/`。
 
 ### 与在线模式的区别
 
 | 阶段 | B站在线模式 | 本地文件模式 |
 |------|------------|------------|
-| 字幕检测 | CC → AI → 兜底 → Qwen3 | 无，直接 Qwen3 |
+| 字幕检测 | CC → AI → 兜底 → ASR | 无，直接 ASR |
 | 元数据 | yt-dlp 从 B站 API 获取 | 文件名作为标题 |
 | 音频处理 | yt-dlp 下载 → ffmpeg 转 WAV | 视频提取音轨 → ffmpeg 转 WAV |
-| 输出目录 | 按发布时间年月分目录 | 统一输出到 OUTPUT_DIR |
+| 输出目录 | `YYYY-MM/` 按发布时间分目录 | `local/` 统一子目录 |
+| ASR 引擎 | Qwen3-ASR（或 FORCE_ASR 后同本地） | Qwen3 / Whisper（由 ASR_ENGINE 控制） |
 | Cookie | 需要（AI 字幕） | 不需要 |
 
 ### 支持的本地格式
@@ -145,12 +146,21 @@ B站收藏夹 API
   ↓ 循环直到 has_more=false
 全量视频列表（id, bvid, title, duration, upper, pubtime）
   ↓
-读取本地已处理记录 processed_videos.txt（每行一个 avid）
+双重去重：
+  ① processed_videos.txt（每行一个 avid）
+  ② 输出目录 .md 文件名 *_<avid>.md（磁盘扫描）
+  ↓ 取并集
   ↓
-取差集（API 返回的 id 不在已处理记录中）
+取差集（API 返回的 id 不在去重集合中）
   ↓
 stdout 输出结构化结果
 ```
+
+### 双重去重（v1.2）
+
+除了 `processed_videos.txt` 文本记录外，`_find_existing_ids()` 遍历 `OUTPUT_DIR` 及子目录下所有 `.md` 文件，从文件名末尾同时提取 avid（纯数字结尾）和 bvid（`BV` 开头结尾）双向匹配。因为 yt-dlp 保存的文件名用的是 bvid 而非 avid，需要同时检查两套 ID。
+
+两层取并集作为最终去重集合。即使 `processed_videos.txt` 被手动删除，只要磁盘上的 `.md` 文件还在，就不会重复转录。
 
 ### 输出协议
 
@@ -274,8 +284,9 @@ CSV 报告字段：bvid, title, author, duration, source, output_file, content_h
 
 1. **扫描必须快** — Scanner 只做 API 调用 + 集合比对，不应包含任何耗时操作。通常 <1 秒完成。
 2. **增量记录用唯一 ID** — 用 avid（数字）而非 bvid 或文件名，避免重名/改名导致重复处理。
-3. **不重复不遗漏** — 处理完立即记录 ID，Agent 中途失败也不会漏掉。
-4. **无增量时静默** — 用户只在有内容变化时才收到通知。
-5. **自愈** — 脚本/Agent 处理失败不阻塞后续扫描，下次运行时自动重试。
-6. **转录脚本只出文件** — 不负责索引、摘要（除非配置了 API Key）。索引是 knowledge-rag 的职责。
-7. **各司其职** — Scanner 负责发现、转录脚本负责产出文件、Agent 负责摘要和通知。
+3. **双重去重兜底** — 文本记录（`processed_videos.txt`）+ 磁盘文件（`*.md` 文件名中的 avid），任一命中即跳过，防止意外删除记录导致重复转录。
+4. **不重复不遗漏** — 处理完立即记录 ID，Agent 中途失败也不会漏掉。
+5. **无增量时静默** — 用户只在有内容变化时才收到通知。
+6. **自愈** — 脚本/Agent 处理失败不阻塞后续扫描，下次运行时自动重试。
+7. **转录脚本只出文件** — 不负责索引。索引是 knowledge-rag 的职责。
+8. **各司其职** — Scanner 负责发现、转录引擎负责产出文件、调度器负责 LLM 后处理和报告。
