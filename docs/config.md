@@ -35,6 +35,7 @@ ANOTHER_KEY="another value"
 | `CACHE_DIR` | `"./cache/audio"` | 下载音频的临时缓存，脚本退出时自动清理 |
 | `MODEL_CACHE_DIR` | `"./models"` | Qwen3-ASR 从 HuggingFace 下载时的缓存目录。Whisper 引擎不使用此配置 |
 | `STATE_DIR` | `"$HOME/.openclaw/workspace/.auto-transcript-state"` | 已处理记录与 CSV 报告 |
+| `EPUB_OUTPUT_DIR` | `"$OUTPUT_DIR/epub"` | EPUB 电子书输出目录 |
 
 ### Conda 环境
 
@@ -95,8 +96,10 @@ pip install mlx-whisper
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `MAX_RETRIES` | `"2"` | 转录失败最大重试次数 |
-| `BATCH_DELAY` | `"3"` | 批量转录时视频间延迟（秒），防 B站风控 |
+| `BATCH_DELAY` | `"3"` | 视频完成后的短延迟（秒），防 B站风控 |
+| `COOLDOWN_DELAY` | `"30"` | 视频间冷却等待（秒），让笔记本散热。与 BATCH_DELAY 叠加，仅在视频间生效，第一个视频立即开始 |
 | `ENABLE_OPENCC` | `"true"` | 繁体转简体 |
+| `INCLUDE_FULL_TEXT` | `"false"` | 是否在 Markdown 中展开完整原文。默认折叠为 `<details>`，设为 `true` 展开为 `## 完整原文` 章节 |
 
 ---
 

@@ -66,6 +66,7 @@ OUTPUT_DIR = _expand_path(
 CONDA_ENV = _env.get("CONDA_ENV", "course-whisper")
 MAX_RETRIES = int(_env.get("MAX_RETRIES", "2"))
 BATCH_DELAY = int(_env.get("BATCH_DELAY", "3"))
+COOLDOWN_DELAY = int(_env.get("COOLDOWN_DELAY", "30"))
 
 # LLM 摘要配置
 SUMMARY_API_KEY = _env.get("SUMMARY_API_KEY", "")
@@ -400,25 +401,40 @@ def generate_summary(filepath):
             title = line.split("视频标题：", 1)[1].strip()
             break
 
-    # 提取原文（"## 完整原文" 标题之后）
-    text_start = content.find("## 完整原文")
+    # 提取原文（在文件末尾，"## AI校对" 之后）
+    # 新版模板：AI校对在前，原文在末尾（默认用 <details> 折叠，或 ## 完整原文 展开）
+    text_start = content.find("## AI校对")
     if text_start == -1:
         return False
 
-    # 跳过标题行本身
-    text_start = content.find("\n", text_start)
+    # 跳过 AI校对 段落到内容结束
+    text_start = content.find("\n---", text_start)
+    if text_start == -1:
+        text_start = content.find("【AI待处理", text_start)
+        if text_start == -1:
+            return False
+    text_start = content.find("\n", text_start + 4)
     if text_start == -1:
         return False
-    text_start += 1
 
-    # 找到原文的结束位置（"## AI校对" 标题或 EOF）
-    text_end = content.find("\n## AI校对", text_start)
-    if text_end == -1:
-        text_end = content.find("文档结束", text_start)
-    if text_end == -1:
-        transcript_text = content[text_start:]
-    else:
-        transcript_text = content[text_start:text_end]
+    # 从 AI校对 段落后取到文件末尾（包含原文）
+    transcript_text = content[text_start:].strip()
+
+    # 如果原文在 <details> 里，提取纯文本；如果在 ## 完整原文 标题下，跳过标题
+    if transcript_text.startswith("<details>"):
+        # 跳过 <details> 和 <summary> 标签
+        inner = transcript_text
+        for tag in ["<details>", "</details>", "<summary>", "</summary>"]:
+            inner = inner.replace(tag, "")
+        # 跳过 summary 内容行（📄 完整原文）
+        nl = inner.find("\n")
+        if nl != -1:
+            inner = inner[nl:].strip()
+        transcript_text = inner
+    elif transcript_text.startswith("## 完整原文"):
+        nl = transcript_text.find("\n")
+        if nl != -1:
+            transcript_text = transcript_text[nl:].strip()
 
     # 控制输入长度（本地模型上下文有限）
     transcript_text = transcript_text[:20000]
@@ -658,9 +674,12 @@ def main():
             fail_count += 1
             print(f"   ❌ [{fail_count}] 失败 (尝试{attempt}次后放弃)")
 
-        # 视频间延迟
+        # 视频间延迟 + 散热冷却
         if i < len(pending):
-            time.sleep(BATCH_DELAY)
+            total_wait = BATCH_DELAY + COOLDOWN_DELAY
+            if total_wait > 0:
+                print(f"   🥶 等待 {total_wait} 秒后处理下一视频（防风控 + 散热）...")
+                time.sleep(total_wait)
 
     # 生成报告
     total_time = time.time() - start_time

@@ -61,11 +61,13 @@ SUMMARY_MODEL="qwen3.6-27b-ud-mlx"
 ## 思维导图
 （LLM 生成：缩进列表层次结构）
 
-## 完整原文
-（转录全文）
-
 ## AI校对
 （LLM 校对：修正错别字 + 断句优化 + 术语检查）
+
+<details>
+<summary>📄 完整原文</summary>
+（转录全文，默认折叠）
+</details>
 ```
 
 ## 项目结构
@@ -80,7 +82,9 @@ bilibili-auto-transcript/
 │   ├── bilibili_scanner.py      # 收藏夹扫描
 │   ├── qwen3_transcribe.py      # Qwen3-ASR
 │   ├── whisper_transcribe.py    # Whisper MLX
-│   └── batch_transcribe.py      # 批量调度
+│   ├── batch_transcribe.py      # 批量调度
+│   ├── organize_categories.py   # 内容分类
+│   └── build_epub.py            # EPUB 导出
 ├── cache/audio/                 # 音频缓存
 └── models/                      # ASR 模型权重
 ```

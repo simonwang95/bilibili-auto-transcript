@@ -213,3 +213,98 @@ batch_transcribe.py (v3.0)
 - `bilibili_scanner.py`：仅扫描收藏夹，不转录
 - `bilibili_transcript.sh`：单视频 URL 或本地目录转录
 - `qwen3_transcribe.py` / `whisper_transcribe.py`：纯语音转文字
+- `organize_categories.py`：将日期目录下的文件按内容分类整理
+- `build_epub.py`：将分类目录打包为 EPUB 电子书
+
+---
+
+## 六、organize_categories.py — 内容分类整理
+
+**版本**: v1.0  
+**语言**: Python 3  
+**职责**: 将日期目录（YYYY-MM）下的 .md 转录文件按内容自动分类到技术/财经等目录
+
+### 调用方式
+
+```bash
+# 自动分类（需 LLM，读取 SUMMARY_API_KEY）
+python scripts/organize_categories.py
+
+# 仅预览，不实际移动文件
+python scripts/organize_categories.py --dry-run
+
+# 手动归类单个文件
+python scripts/organize_categories.py --category 技术 /path/to/file.md
+```
+
+### 工作流程
+
+1. 扫描 `OUTPUT_DIR` 下所有 `YYYY-MM` 格式的日期目录
+2. 对每个 `.md` 文件提取标题 + 摘要 + 思维导图（截取到完整原文之前）
+3. 调用 LLM 从默认分类（技术/财经/生活/教育/其他）中判定归属
+4. 将文件移动到 `OUTPUT_DIR/<分类>/` 目录
+5. 删除已清空的日期目录
+
+### 默认分类
+
+| 分类 | 典型内容 |
+|------|---------|
+| 技术 | AI/编程/工具/软件 |
+| 财经 | 经济/投资/商业 |
+| 生活 | 日常/健康/旅游/美食 |
+| 教育 | 课程/科普/学术 |
+| 其他 | 无法归类的兜底 |
+
+---
+
+## 七、build_epub.py — EPUB 电子书导出
+
+**版本**: v2.0  
+**语言**: Python 3  
+**依赖**: 无（纯标准库，无需 ebooklib / markdown 等外部包）  
+**职责**: 合并所有分类目录下的 .md 文件为一部 EPUB，分类为一级目录，视频标题为二级目录
+
+### 调用方式
+
+```bash
+# 合并所有分类生成一本 EPUB
+python scripts/build_epub.py
+
+# 指定输出目录
+python scripts/build_epub.py --output-dir ./books
+
+# 保留临时构建目录（调试用）
+python scripts/build_epub.py --keep-build
+```
+
+### 书籍结构
+
+```
+B站视频转录合集
+├── 技术                          ← 一级目录（EPUB 章节）
+│   ├── ChatGPT 原理详解          ← 二级目录（视频标题）
+│   │   ├── 视频摘要
+│   │   ├── 思维导图（嵌套列表，最多四级深度）
+│   │   └── AI校对
+│   └── Kubernetes 部署指南
+├── 财经                          ← 一级目录
+│   └── ...
+└── 生成日期                      ← 末尾页
+```
+
+### Markdown 解析
+
+纯 Python 标准库实现的逐行解析器，核心特性：
+
+- **嵌套列表**：通过栈跟踪缩进级别（每 2 空格一级），支持最多四级深度。同级兄弟闭合前一个 `<li>` 再开新项，子级在父 `<li>` 内嵌 `<ul>`。空白行不打断列表延续，非列表元素（标题/分隔线）自动关闭所有列表
+- **引用块**：每条 `> ` 独立一个 `<blockquote><p>`，保证元信息逐行换行
+- **标题**：`#` / `##` / `###` → `<h1>` / `<h2>` / `<h3>`（子章节模式下全部降一级）
+- **行内格式**：粗体 `**text**`、行内代码 `` `code` ``
+
+### 处理规则
+
+- **剔除完整原文**：识别 `<details>` 折叠块或 `## 完整原文` 标题并移除，EPUB 只保留摘要/导图/校对
+- **分类入口页**：每个分类一个导航页，列出该分类下所有文章链接
+- **末尾页**：生成日期 + 署名
+- **文件名**：`bilibili-all-YYYY-MM-DD.epub`，日期自动取当天
+- **零依赖**：直接生成 EPUB 3.0 标准的 XML/ZIP 包，兼容 iBooks / Kindle / 各类阅读器

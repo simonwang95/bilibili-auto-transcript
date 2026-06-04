@@ -290,3 +290,4 @@ CSV 报告字段：bvid, title, author, duration, source, output_file, content_h
 6. **自愈** — 脚本/Agent 处理失败不阻塞后续扫描，下次运行时自动重试。
 7. **转录脚本只出文件** — 不负责索引。索引是 knowledge-rag 的职责。
 8. **各司其职** — Scanner 负责发现、转录引擎负责产出文件、调度器负责 LLM 后处理和报告。
+9. **文档同步** — 每次功能更新同步更新 docs/ 下的对应文档，保持代码与文档一致。

@@ -565,6 +565,7 @@ transcribe_local_file() {
 
 write_output_file() {
     local out="$1" title="$2" link="$3" author="$4" date="$5" duration="$6" source="$7" text="$8"
+    local include_full="${INCLUDE_FULL_TEXT:-false}"
 
     cat > "$out" << EOF
 # $title
@@ -590,16 +591,32 @@ write_output_file() {
 
 ---
 
-## 完整原文
-
-$text
-
----
-
 ## AI校对
 
 【AI待处理：请设置 SUMMARY_API_KEY 后重新运行以生成校对版本】
+
+---
 EOF
+
+    # 完整原文在末尾，默认折叠（LLM 处理时需要，用户查看时可收起）
+    if [ "$include_full" = "true" ]; then
+        cat >> "$out" << EOF
+
+## 完整原文
+
+$text
+EOF
+    else
+        cat >> "$out" << EOF
+
+<details>
+<summary>📄 完整原文</summary>
+
+$text
+
+</details>
+EOF
+    fi
 }
 
 # ===== 主入口 =====

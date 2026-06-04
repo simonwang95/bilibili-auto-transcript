@@ -35,7 +35,9 @@ bilibili-auto-transcript/
 │   ├── bilibili_scanner.py      # 收藏夹扫描器 v1.2
 │   ├── qwen3_transcribe.py      # Qwen3-ASR v1.3
 │   ├── whisper_transcribe.py    # Whisper (MLX) v1.0
-│   └── batch_transcribe.py      # 批量调度器 v3.0
+│   ├── batch_transcribe.py      # 批量调度器 v3.0
+│   ├── organize_categories.py   # 内容分类整理
+│   └── build_epub.py            # EPUB 电子书导出
 ├── cache/audio/                 # 音频缓存（不提交）
 └── models/                      # ASR 模型权重（不提交）
 ```
@@ -114,6 +116,9 @@ PROOFREAD_DOMAINS="finance,computer,medical,legal,engineering"
 | 转录本地目录 | `python scripts/batch_transcribe.py --local-dir <目录>` |
 | 单个 B站视频 | `bash scripts/bilibili_transcript.sh "<URL>"` |
 | 只扫描不转录 | `python scripts/bilibili_scanner.py` |
+| 分类整理文件 | `python scripts/organize_categories.py` |
+| 预览分类 | `python scripts/organize_categories.py --dry-run` |
+| 导出 EPUB（合并） | `python scripts/build_epub.py` |
 
 ## 外部依赖
 
