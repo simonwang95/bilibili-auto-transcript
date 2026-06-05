@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--output-file", required=True, help="输出文件路径（第一行=来源，后续=文本）")
     parser.add_argument("--model-path", required=True, help="本地 Whisper 模型路径")
     parser.add_argument("--language", default=None, help="转录语言（如 zh, en, ja），默认自动检测")
+    parser.add_argument("--prompt", default=None, help="Whisper 初始提示词，用于提供语言、术语或风格提示")
     args = parser.parse_args()
 
     if not os.path.exists(args.audio):
@@ -33,6 +34,9 @@ def main():
     language = args.language or os.environ.get("ASR_LANGUAGE", None)
     if language:
         print(f"   🌐 指定语言: {language}", file=sys.stderr)
+    prompt = args.prompt or os.environ.get("ASR_PROMPT", None)
+    if prompt:
+        print(f"   💡 使用转录提示: {prompt[:80]}", file=sys.stderr)
 
     model_name = os.path.basename(args.model_path.rstrip("/"))
     print(f"🎤 使用本地 Whisper 模型: {model_name}", file=sys.stderr)
@@ -52,6 +56,8 @@ def main():
         transcribe_kwargs = {"path_or_hf_repo": args.model_path}
         if language:
             transcribe_kwargs["language"] = language
+        if prompt:
+            transcribe_kwargs["initial_prompt"] = prompt
 
         result = mlx_whisper.transcribe(
             args.audio,

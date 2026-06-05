@@ -61,7 +61,7 @@ env.local (source 加载) → 脚本默认值
 本地模式的处理优先级：
 
 1. 已存在同名输出 Markdown → 跳过，避免重复 ASR
-2. `FORCE_ASR=false` 且存在同目录同名 `.srt` → 直接导入字幕
+2. `FORCE_ASR=false` 且存在同目录同名 `.srt` → 直接导入字幕。支持精确同名 `video.srt`，以及常见语言后缀 `video_中文（中国）.srt`
 3. 其他情况 → 视频自动用 ffmpeg 提取音轨并转 16kHz WAV，送入 ASR 引擎转录
 
 结果保存到 `OUTPUT_DIR/local/`。
@@ -156,10 +156,12 @@ python scripts/qwen3_transcribe.py \
 python scripts/whisper_transcribe.py \
   --audio <音频路径> \
   --output-file <输出路径> \
-  --model-path <本地 Whisper 模型目录>
+  --model-path <本地 Whisper 模型目录> \
+  [--language zh] \
+  [--prompt <转录提示词>]
 ```
 
-在 `env.local` 中设置 `ASR_ENGINE="whisper"` 切换到此引擎。`bilibili_transcript.sh` 的 `run_asr_transcribe()` 自动分发。
+在 `env.local` 中设置 `ASR_ENGINE="whisper"` 切换到此引擎。`bilibili_transcript.sh` 的 `run_asr_transcribe()` 自动分发。可通过 `ASR_LANGUAGE` 指定语言，通过 `ASR_PROMPT` 向 Whisper 传入初始提示词，例如课程领域、术语、股票/AI/摄影等专有名词。
 
 ---
 

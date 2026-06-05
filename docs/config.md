@@ -70,6 +70,7 @@ pip install mlx-whisper
 | `FORCE_ASR` | `"false"` | 设为 `true` 跳过字幕检测，强制用本地 ASR 转录。B站模式跳过 CC/AI 字幕；本地模式跳过同名 `.srt` 字幕 |
 | `FORCE_ASR_CPU` | `"false"` | Qwen3-ASR 专用。Apple Silicon 上 MPS 可能内存超限（47GB），设为 `true` 强制 CPU 推理 |
 | `ASR_LANGUAGE` | `""` | Whisper 转录语言。默认空字符串=自动检测，非中文内容保留原语言。纯中文视频可设为 `zh` 强制提高准确率（但会丢失英文等非中文内容） |
+| `ASR_PROMPT` | `""` | Whisper 初始提示词。可填入课程领域、专有名词、缩写等，帮助转写稳定；仅 `ASR_ENGINE=whisper` 时生效 |
 
 `ASR_ENGINE=whisper` 时自动忽略 `FORCE_ASR_CPU`（Whisper 走 MLX 不走 PyTorch MPS）。
 

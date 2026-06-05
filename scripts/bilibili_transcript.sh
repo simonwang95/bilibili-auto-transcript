@@ -252,15 +252,20 @@ run_asr_transcribe() {
             lang_arg=(--language "$ASR_LANGUAGE")
             echo "   🌐 语言: $ASR_LANGUAGE"
         fi
+        local prompt_arg=()
+        if [ -n "${ASR_PROMPT:-}" ]; then
+            prompt_arg=(--prompt "$ASR_PROMPT")
+            echo "   💡 Whisper 提示: ${ASR_PROMPT:0:80}"
+        fi
 
         if [ "$transcribe_py" = "conda" ]; then
             conda run -n "$CONDA_ENV" python3 "$wh_script" \
                 --audio "$audio_file" --output-file "$output_file" \
-                --model-path "$model_path" "${lang_arg[@]}"
+                --model-path "$model_path" "${lang_arg[@]}" "${prompt_arg[@]}"
         else
             "$transcribe_py" "$wh_script" \
                 --audio "$audio_file" --output-file "$output_file" \
-                --model-path "$model_path" "${lang_arg[@]}"
+                --model-path "$model_path" "${lang_arg[@]}" "${prompt_arg[@]}"
         fi
 
     else
@@ -540,8 +545,15 @@ transcribe_local_file() {
     fi
 
     # FORCE_ASR=false 时，优先使用同目录同名 .srt 字幕，避免不必要的 ASR。
-    local subtitle_file="${file_path%.*}.srt"
-    if [ "${FORCE_ASR:-false}" != "true" ] && [ -f "$subtitle_file" ] && [ -s "$subtitle_file" ]; then
+    local subtitle_file=""
+    for candidate in "${file_path%.*}.srt" "${file_path%.*}_中文（中国）.srt"; do
+        if [ -f "$candidate" ] && [ -s "$candidate" ]; then
+            subtitle_file="$candidate"
+            break
+        fi
+    done
+
+    if [ "${FORCE_ASR:-false}" != "true" ] && [ -n "$subtitle_file" ]; then
         echo "   📝 $file_label: 发现同名 SRT 字幕，优先使用: $(basename "$subtitle_file")"
         local subtitle_text
         subtitle_text=$(extract_srt_text "$subtitle_file" | to_simplified)

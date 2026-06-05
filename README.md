@@ -45,6 +45,7 @@ bash scripts/bilibili_transcript.sh "https://www.bilibili.com/video/BVxxxxx/"  #
 FAV_MEDIA_ID="your_id"                                        # B站收藏夹 ID
 ASR_ENGINE="whisper"                                          # qwen3 | whisper
 ASR_LOCAL_MODEL="/path/to/whisper-large-v3-turbo"             # 本地模型路径
+ASR_PROMPT="以下是中文课程音频，可能包含 AI、股票、摄影等专有名词。"  # Whisper 提示词
 FORCE_ASR="true"                                              # 跳过 B站字幕，直接本地转录
 SUMMARY_API_KEY="lm-studio"                                   # LLM API Key
 SUMMARY_API_URL="http://127.0.0.1:1234/v1"                    # LM Studio / Ollama
