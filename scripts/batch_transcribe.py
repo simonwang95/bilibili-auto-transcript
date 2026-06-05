@@ -196,6 +196,25 @@ def _stream_subprocess(args, **kwargs):
     )
 
 
+def _extract_output_paths(stdout):
+    """从子脚本输出中提取独立一行打印的真实 Markdown 路径。"""
+    paths = []
+    seen = set()
+    for line in stdout.splitlines():
+        path = line.strip()
+        if not path.endswith(".md"):
+            continue
+        if not os.path.isabs(path):
+            continue
+        if not os.path.isfile(path):
+            continue
+        if path in seen:
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
+
+
 def scan_videos():
     """扫描 B站收藏夹新视频"""
     python_cmd = get_python_cmd()
@@ -281,10 +300,8 @@ def transcribe_video(bvid, attempt=1, max_retries=1):
     used_stt = "🎤" in result.stdout
 
     if "✅ 转录完成" in result.stdout:
-        saved_file = None
-        for line in result.stdout.splitlines():
-            if line.strip().endswith(".md") and "/" in line:
-                saved_file = line.strip()
+        output_paths = _extract_output_paths(result.stdout)
+        saved_file = output_paths[-1] if output_paths else None
         transcript_source = None
         for line in result.stdout.splitlines():
             if "转录来源" in line:
@@ -313,13 +330,7 @@ def transcribe_local_dir(local_dir, recursive=False):
         cwd=SKILL_DIR, timeout=7200,
     )
 
-    # 解析输出文件列表
-    output_files = []
-    for line in result.stdout.splitlines():
-        if line.strip().endswith(".md") and "/" in line:
-            output_files.append(line.strip())
-
-    return output_files, result.returncode
+    return _extract_output_paths(result.stdout), result.returncode
 
 
 def _is_retryable_http_status(status_code):
