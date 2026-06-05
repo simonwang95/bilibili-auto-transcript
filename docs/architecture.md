@@ -146,19 +146,24 @@ B站收藏夹 API
   ↓ 循环直到 has_more=false
 全量视频列表（id, bvid, title, duration, upper, pubtime）
   ↓
-双重去重：
-  ① processed_videos.txt（每行一个 avid）
-  ② 输出目录 .md 文件名 *_<avid>.md（磁盘扫描）
-  ↓ 取并集
+去重：磁盘 .md 文件（权威来源）
+  → _find_existing_ids() 遍历 OUTPUT_DIR 下所有 *.md 文件名
+  → 从文件名末尾提取 avid（纯数字）和 bvid（BV 开头）双向匹配
+  → processed_videos.txt 仅作日志参考，不作为去重依据
   ↓
-取差集（API 返回的 id 不在去重集合中）
+取差集（API 返回的 bvid 不在磁盘 bvid 集合中 → 新视频）
   ↓
 stdout 输出结构化结果
 ```
 
-### 双重去重（v1.2）
+### 磁盘文件权威去重（v1.3）
 
-除了 `processed_videos.txt` 文本记录外，`_find_existing_ids()` 遍历 `OUTPUT_DIR` 及子目录下所有 `.md` 文件，从文件名末尾同时提取 avid（纯数字结尾）和 bvid（`BV` 开头结尾）双向匹配。因为 yt-dlp 保存的文件名用的是 bvid 而非 avid，需要同时检查两套 ID。
+磁盘上的 `.md` 文件是唯一去重来源。文件名由 yt-dlp 的 video_id（bvid）结尾，`_find_existing_ids()` 提取所有 `.md` 文件末尾的视频 ID 并双向匹配。
+
+**为什么「磁盘为准」**：
+- `processed_videos.txt` 可能因手动删除、版本迁移等原因对应关系丢失
+- 磁盘 `.md` 文件是真实产物，存在 = 已转录，不存在 = 未转录或转录失败
+- 转录失败的视频没有 `.md` 文件 → 总会出现在新视频列表中 → 自动重试
 
 两层取并集作为最终去重集合。即使 `processed_videos.txt` 被手动删除，只要磁盘上的 `.md` 文件还在，就不会重复转录。
 
@@ -283,7 +288,7 @@ CSV 报告字段：bvid, title, author, duration, source, output_file, content_h
 
 1. **扫描必须快** — Scanner 只做 API 调用 + 集合比对，不应包含任何耗时操作。通常 <1 秒完成。
 2. **增量记录用唯一 ID** — 用 avid（数字）而非 bvid 或文件名，避免重名/改名导致重复处理。
-3. **双重去重兜底** — 文本记录（`processed_videos.txt`）+ 磁盘文件（`*.md` 文件名中的 avid），任一命中即跳过，防止意外删除记录导致重复转录。
+3. **磁盘文件权威去重** — 仅以输出目录中的 `.md` 文件判断是否已转录。文件存在 = 跳过，不存在 = 重试（含之前失败的）。`processed_videos.txt` 仅作日志，不干预去重逻辑。
 4. **不重复不遗漏** — 处理完立即记录 ID，Agent 中途失败也不会漏掉。
 5. **无增量时静默** — 用户只在有内容变化时才收到通知。
 6. **自愈** — 脚本/Agent 处理失败不阻塞后续扫描，下次运行时自动重试。

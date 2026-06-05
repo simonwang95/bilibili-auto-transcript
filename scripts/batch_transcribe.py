@@ -621,8 +621,8 @@ def main():
         print("没有新视频需要转录")
         return 0
 
-    processed = load_processed()
-    pending = [v for v in videos if v["avid"] not in processed]
+    # 扫描器已通过磁盘文件做了权威去重，videos 中就是真正需要转录的
+    pending = videos
     total = len(videos)
     remaining = len(pending)
 

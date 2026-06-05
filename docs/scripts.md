@@ -63,9 +63,9 @@ env.local (source 加载) → 脚本默认值
 
 ## 二、bilibili_scanner.py — 收藏夹扫描器
 
-**版本**: v1.2  
+**版本**: v1.3  
 **语言**: Python 3  
-**职责**: 分页获取收藏夹全量视频，双重去重（文本记录 + 磁盘文件），输出新增视频列表
+**职责**: 分页获取收藏夹全量视频，磁盘文件权威去重，输出新增视频列表
 
 ### 调用方式
 
@@ -75,13 +75,11 @@ python scripts/bilibili_scanner.py
 
 所有配置通过 `env.local` 读取。
 
-### 双重去重机制（v1.2）
+### 磁盘文件权威去重（v1.3）
 
-**来源 1 — `processed_videos.txt`**：每行一个 avid，由 `batch_transcribe.py` 在转录成功后写入。
+`_find_existing_ids()` 遍历 `OUTPUT_DIR` 及子目录下所有 `.md` 文件，从文件名末尾提取 avid/bvid 双向匹配。**磁盘文件是唯一去重来源**——文件存在 = 已转录，不存在 = 新视频（含之前失败的）。
 
-**来源 2 — 输出目录 `.md` 文件**：`_find_existing_ids()` 遍历 `OUTPUT_DIR` 及子目录下所有 `.md` 文件，从文件名末尾同时提取 avid（纯数字结尾）和 bvid（`BV` 开头结尾）。因为 yt-dlp 保存的文件名用的是 bvid 而非 avid，所以需要双向匹配。文件名格式为 `{title}_{author}_{date}_{video_id}.md`。
-
-两层取并集。即使 `processed_videos.txt` 被删除，磁盘上的 `.md` 文件仍会阻止重复转录。输出示例：
+`processed_videos.txt` 仅作日志参考，不再参与去重判断。输出示例：
 
 ```
 PROCESSED:7 (text:5, disk:4)
@@ -200,7 +198,7 @@ python scripts/batch_transcribe.py --local-dir /path/to/videos/
 batch_transcribe.py (v3.0)
   ├── --local-dir → bilibili_transcript.sh --local-dir
   └── 默认模式:
-        ├── bilibili_scanner.py（双重去重：文本+磁盘）
+        ├── bilibili_scanner.py（磁盘文件权威去重）
         └── bilibili_transcript.sh（三级降级 / ASR）
               ├── source env.local
               ├── run_asr_transcribe()

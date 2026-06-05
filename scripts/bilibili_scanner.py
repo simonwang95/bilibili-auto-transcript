@@ -172,26 +172,27 @@ def main():
     medias = fetch_all_medias()
     print(f"COLLECTION_TOTAL:{len(medias)}")
 
-    # 扫描输出目录中已有的 .md 文件，提取 avid/bvid
+    # 扫描输出目录，磁盘 .md 文件是去重的权威来源
     disk_avids, disk_bvids = _find_existing_ids()
 
-    # 合并三处来源：文本记录（avid）+ 磁盘 avid + 磁盘 bvid
+    # 加载文本记录（仅用于日志参考，不作为去重依据）
     text_processed = set()
     if os.path.exists(PROCESSED_FILE):
         with open(PROCESSED_FILE) as f:
             text_processed = set(line.strip() for line in f if line.strip())
 
-    processed = text_processed | disk_avids
-    disk_bvids_only = disk_bvids - processed  # 还没有被 avid 覆盖到的 bvid
-    total_disk = len(disk_avids) + len(disk_bvids_only)
-    print(f"PROCESSED:{len(processed)} (text:{len(text_processed)}, disk:{total_disk})")
+    # 权威去重：仅以磁盘 .md 文件为准
+    # 文件名末尾是 bvid（由 yt-dlp 的 video_id 决定），disk_avids 几乎总是空
+    # 真正的去重靠 bvid 匹配，avid 仅作补充（future-proof）
+    total_disk = len(disk_avids) + len(disk_bvids)
+    print(f"PROCESSED:{total_disk} (disk:{total_disk}, text:{len(text_processed)})")
 
-    # 找出新视频：avid 不在去重集合中，且 bvid 也不在磁盘 bvid 集合中
+    # 找出新视频：磁盘上无对应 .md 文件
     new_videos = []
     for m in medias:
         avid = str(m["id"])
         bvid = m.get("bvid", "") or m.get("bv_id", "")
-        if avid in processed or bvid in disk_bvids:
+        if avid in disk_avids or bvid in disk_bvids:
             continue
         new_videos.append({
             "avid": avid,
