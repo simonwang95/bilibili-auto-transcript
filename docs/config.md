@@ -98,7 +98,7 @@ pip install mlx-whisper
 |--------|--------|------|
 | `MAX_RETRIES` | `"2"` | 转录失败最大重试次数 |
 | `BATCH_DELAY` | `"3"` | 视频完成后的短延迟（秒），防 B站风控 |
-| `COOLDOWN_DELAY` | `"30"` | 视频间冷却等待（秒），让笔记本散热。与 BATCH_DELAY 叠加，仅在视频间生效，第一个视频立即开始 |
+| `COOLDOWN_DELAY` | `"30"` | LLM 后处理冷却等待（秒），每次摘要/导图/校对完成后等待散热。Whisper/ASR 转录之间不等待 |
 | `ENABLE_OPENCC` | `"true"` | 繁体转简体 |
 | `INCLUDE_FULL_TEXT` | `"false"` | 是否在 Markdown 中展开完整原文。默认折叠为 `<details>`，设为 `true` 展开为 `## 完整原文` 章节 |
 

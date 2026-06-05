@@ -666,14 +666,8 @@ if [ -n "$LOCAL_DIR" ]; then
     echo "📊 找到 $count 个媒体文件"
     echo ""
 
-    success=0 fail=0 first=1
+    success=0 fail=0
     while IFS= read -r f; do
-        # 第一个文件立即开始，后续文件间等待冷却
-        if [ "$first" != "1" ] && [ "${COOLDOWN_DELAY:-0}" -gt 0 ]; then
-            echo "🥶 等待 ${COOLDOWN_DELAY} 秒（散热）..."
-            sleep "$COOLDOWN_DELAY"
-        fi
-        first=0
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         if transcribe_local_file "$f"; then
             success=$((success + 1))

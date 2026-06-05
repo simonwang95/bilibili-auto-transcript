@@ -601,11 +601,15 @@ def main():
         # 生成摘要
         if SUMMARY_API_KEY and output_files:
             print(f"\n📝 生成 AI 摘要...")
-            for f in output_files:
+            for i, f in enumerate(output_files):
                 try:
                     generate_summary(f)
                 except Exception as e:
                     print(f"   ⚠️ 摘要生成异常: {e}")
+                # LLM 散热
+                if COOLDOWN_DELAY > 0 and i < len(output_files) - 1:
+                    print(f"   🥶 LLM 散热等待 {COOLDOWN_DELAY} 秒...")
+                    time.sleep(COOLDOWN_DELAY)
 
         total_time = time.time() - start_time
         print(f"\n⏱️  总耗时: {int(total_time // 60)}分{int(total_time % 60)}秒")
@@ -706,6 +710,10 @@ def main():
                     generate_summary(output_file)
                 except Exception as e:
                     print(f"   ⚠️ 摘要生成异常: {e}")
+                # LLM 散热
+                if COOLDOWN_DELAY > 0 and i < len(pending):
+                    print(f"   🥶 LLM 散热等待 {COOLDOWN_DELAY} 秒...")
+                    time.sleep(COOLDOWN_DELAY)
 
         else:
             report_rows.append({
@@ -723,12 +731,11 @@ def main():
             fail_count += 1
             print(f"   ❌ [{fail_count}] 失败 (尝试{attempt}次后放弃)")
 
-        # 视频间延迟 + 散热冷却
+        # 视频间防风控延迟
         if i < len(pending):
-            total_wait = BATCH_DELAY + COOLDOWN_DELAY
-            if total_wait > 0:
-                print(f"   🥶 等待 {total_wait} 秒后处理下一视频（防风控 + 散热）...")
-                time.sleep(total_wait)
+            if BATCH_DELAY > 0:
+                print(f"   ⏳ 等待 {BATCH_DELAY} 秒后处理下一视频...")
+                time.sleep(BATCH_DELAY)
 
     # 生成报告
     total_time = time.time() - start_time

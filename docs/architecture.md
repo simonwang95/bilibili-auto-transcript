@@ -238,7 +238,7 @@ eta = avg_time * remaining_count
 
 ### 视频间延迟
 
-每个视频处理后等待 `BATCH_DELAY + COOLDOWN_DELAY` 秒（默认 3+30=33 秒），防风控 + 笔记本散热。
+每个视频处理后等待 `BATCH_DELAY` 秒防风控。LLM 后处理（摘要/导图/校对）之间等待 `COOLDOWN_DELAY` 秒散热。Whisper/ASR 转录之间不等待。
 
 ## 七、输出文件格式
 
