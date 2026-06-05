@@ -56,7 +56,7 @@ env.local (source 加载) → 脚本默认值
 
 ### 本地目录模式
 
-扫描目录中的媒体文件（mp4/mkv/avi/mov/webm/flv/wmv/ts + mp3/m4a/wav/flac/ogg/opus/aac）。默认只扫描目录第一层；加 `--recursive` 后递归扫描子目录。
+扫描目录中的媒体文件（mp4/mkv/avi/mov/webm/flv/wmv/ts + mp3/m4a/wav/flac/ogg/opus/aac）。默认只扫描目录第一层；加 `--recursive` 后递归扫描子目录。隐藏文件会被跳过，包括 macOS 外置盘常见的 `._*.mov` AppleDouble 元数据文件。
 
 本地模式的处理优先级：
 

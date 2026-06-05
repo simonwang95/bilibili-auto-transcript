@@ -89,6 +89,7 @@ cleanup_temp() {
           "$CACHE_DIR"/bilibili_audio*.wav "$CACHE_DIR"/bilibili_audio*.txt \
           "$CACHE_DIR"/.qwen_transcript.txt \
           "$CACHE_DIR"/local_audio*.wav "$CACHE_DIR"/local_audio*.mp3 "$CACHE_DIR"/local_audio*.m4a
+    rm -rf "$CACHE_DIR"/local_work_*
 }
 trap cleanup_temp EXIT
 
@@ -557,9 +558,14 @@ transcribe_local_file() {
         echo "   ⚠️  $file_label: 同名 SRT 字幕为空，回落到 ASR"
     fi
 
+    local work_id="${$}_${file_index:-0}_${RANDOM}"
+    local work_dir="${CACHE_DIR}/local_work_${work_id}"
+    mkdir -p "$work_dir"
+
     if echo "$video_exts" | grep -qw "$ext"; then
         echo "   🎬 $file_label: 检测到视频格式，提取音频..."
-        local audio_out="${CACHE_DIR}/local_audio_$$.wav"
+        local audio_out="${work_dir}/audio.wav"
+        rm -f "$audio_out"
         ffmpeg -y -i "$file_path" -vn -ar 16000 -ac 1 "$audio_out" 2>/dev/null
         if [ -f "$audio_out" ] && [ -s "$audio_out" ]; then
             audio_input="$audio_out"
@@ -575,7 +581,8 @@ transcribe_local_file() {
         channels=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels -of default=noprint_wrappers=1:nokey=1 "$file_path" 2>/dev/null)
         if [ "$sample_rate" != "16000" ] || [ "$channels" != "1" ]; then
             echo "   🔄 $file_label: 音频格式优化（16kHz 单声道）..."
-            local wav_out="${CACHE_DIR}/local_audio_$$.wav"
+            local wav_out="${work_dir}/audio.wav"
+            rm -f "$wav_out"
             ffmpeg -y -i "$file_path" -ar 16000 -ac 1 "$wav_out" 2>/dev/null
             if [ -f "$wav_out" ] && [ -s "$wav_out" ]; then
                 audio_input="$wav_out"
@@ -589,7 +596,8 @@ transcribe_local_file() {
     else
         # 其他音频格式统一转换
         echo "   🔄 $file_label: 音频格式优化（16kHz 单声道）..."
-        local wav_out="${CACHE_DIR}/local_audio_$$.wav"
+        local wav_out="${work_dir}/audio.wav"
+        rm -f "$wav_out"
         ffmpeg -y -i "$file_path" -ar 16000 -ac 1 "$wav_out" 2>/dev/null
         if [ -f "$wav_out" ] && [ -s "$wav_out" ]; then
             audio_input="$wav_out"
@@ -601,18 +609,19 @@ transcribe_local_file() {
 
     # 本地 ASR 转录
     echo "   🎤 $file_label: 开始语音转文字..."
-    local q3_output="${CACHE_DIR}/.qwen_transcript.txt"
+    local q3_output="${work_dir}/transcript.txt"
+    rm -f "$q3_output"
     run_asr_transcribe "$audio_input" "$q3_output"
 
     if [ ! -f "$q3_output" ] || [ ! -s "$q3_output" ]; then
         echo "❌ $file_label: ASR 转录失败"
-        rm -f "$q3_output"
+        rm -rf "$work_dir"
         return 1
     fi
 
     local TRANSCRIPT_SOURCE; TRANSCRIPT_SOURCE=$(head -1 "$q3_output")
     local TRANSCRIPT_TEXT;    TRANSCRIPT_TEXT=$(tail -n +2 "$q3_output")
-    rm -f "$q3_output"
+    rm -rf "$work_dir"
 
     # 繁体转简体
     TRANSCRIPT_TEXT=$(echo "$TRANSCRIPT_TEXT" | to_simplified)
@@ -705,9 +714,9 @@ if [ -n "$LOCAL_DIR" ]; then
               -o -name "*.ogg" -o -name "*.opus" -o -name "*.aac")
 
     if [ "$LOCAL_RECURSIVE" = "true" ]; then
-        files=$(find "$LOCAL_DIR" -type f \( "${patterns[@]}" \) 2>/dev/null | sort)
+        files=$(find "$LOCAL_DIR" -type f ! -name ".*" \( "${patterns[@]}" \) 2>/dev/null | sort)
     else
-        files=$(find "$LOCAL_DIR" -maxdepth 1 -type f \( "${patterns[@]}" \) 2>/dev/null | sort)
+        files=$(find "$LOCAL_DIR" -maxdepth 1 -type f ! -name ".*" \( "${patterns[@]}" \) 2>/dev/null | sort)
     fi
 
     if [ -z "$files" ]; then
