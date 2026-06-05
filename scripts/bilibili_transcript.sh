@@ -562,6 +562,16 @@ transcribe_local_file() {
     local NOW; NOW=$(date '+%Y-%m-%d')
     local LOCAL_OUT="${OUTPUT_DIR}/local"
     mkdir -p "$LOCAL_OUT"
+
+    # 去重：检查是否已有同名前缀的 .md 文件（不同日期生成的文件算同一个）
+    local EXISTING
+    EXISTING=$(find "$LOCAL_OUT" -maxdepth 1 -name "${SAFE_NAME}_*.md" -type f 2>/dev/null | head -1)
+    if [ -n "$EXISTING" ]; then
+        echo "   ⏭️  已存在转录文件: $(basename "$EXISTING")，跳过"
+        echo "$EXISTING"
+        return 0
+    fi
+
     local OUTPUT_FILE="${LOCAL_OUT}/${SAFE_NAME}_${NOW}.md"
 
     write_output_file "$OUTPUT_FILE" "$base_name" "file://$file_path" "本地文件" "$NOW" "未知" "$TRANSCRIPT_SOURCE" "$TRANSCRIPT_TEXT"
@@ -656,8 +666,14 @@ if [ -n "$LOCAL_DIR" ]; then
     echo "📊 找到 $count 个媒体文件"
     echo ""
 
-    success=0 fail=0
+    success=0 fail=0 first=1
     while IFS= read -r f; do
+        # 第一个文件立即开始，后续文件间等待冷却
+        if [ "$first" != "1" ] && [ "${COOLDOWN_DELAY:-0}" -gt 0 ]; then
+            echo "🥶 等待 ${COOLDOWN_DELAY} 秒（散热）..."
+            sleep "$COOLDOWN_DELAY"
+        fi
+        first=0
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         if transcribe_local_file "$f"; then
             success=$((success + 1))
