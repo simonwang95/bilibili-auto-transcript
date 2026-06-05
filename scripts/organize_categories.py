@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import sys
+import time
 
 import requests
 
@@ -45,6 +46,9 @@ OUTPUT_DIR = _expand_path(_env.get("OUTPUT_DIR", "~/workspace/knowledge/bilibili
 SUMMARY_API_KEY = _env.get("SUMMARY_API_KEY", "")
 SUMMARY_API_URL = _env.get("SUMMARY_API_URL", "http://127.0.0.1:1234/v1")
 SUMMARY_MODEL = _env.get("SUMMARY_MODEL", "auto")
+LLM_TIMEOUT = int(_env.get("LLM_TIMEOUT", "600"))
+LLM_MAX_RETRIES = max(0, int(_env.get("LLM_MAX_RETRIES", "2")))
+LLM_RETRY_DELAY = max(0.0, float(_env.get("LLM_RETRY_DELAY", "3")))
 
 # 默认分类标签
 DEFAULT_CATEGORIES = ["技术", "财经", "生活", "教育", "其他"]
@@ -94,14 +98,76 @@ def extract_preview(filepath):
     return content[:stop_at].strip()[:3000]
 
 
+def _is_retryable_http_status(status_code):
+    return status_code in (408, 409, 425, 429) or status_code >= 500
+
+
+def _post_llm(payload):
+    api_url = SUMMARY_API_URL.rstrip("/")
+    if not api_url.endswith("/chat/completions"):
+        api_url += "/chat/completions"
+
+    total_attempts = max(1, LLM_MAX_RETRIES + 1)
+    last_error = None
+
+    for attempt in range(1, total_attempts + 1):
+        try:
+            resp = requests.post(
+                api_url,
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {SUMMARY_API_KEY}",
+                },
+                timeout=LLM_TIMEOUT,
+            )
+
+            if resp.status_code >= 400:
+                preview = resp.text.strip()[:500]
+                msg = f"HTTP {resp.status_code}: {preview or resp.reason}"
+                if not _is_retryable_http_status(resp.status_code):
+                    raise RuntimeError(msg)
+                raise requests.HTTPError(msg, response=resp)
+
+            data = resp.json()
+            if "choices" in data:
+                content = data["choices"][0]["message"]["content"]
+            elif "content" in data:
+                content = data["content"]
+            else:
+                raise ValueError(f"Unexpected response: {data}")
+
+            if not content or not content.strip():
+                raise ValueError("Empty LLM response")
+
+            return content
+
+        except RuntimeError:
+            raise
+        except (requests.Timeout, requests.ConnectionError, requests.HTTPError, ValueError) as e:
+            last_error = e
+            if attempt >= total_attempts:
+                break
+            wait = LLM_RETRY_DELAY * (2 ** (attempt - 1))
+            print(f"   ⚠️ LLM 分类调用失败（第 {attempt}/{total_attempts} 次）: {e}")
+            print(f"   ⏳ {wait:g} 秒后重试...")
+            time.sleep(wait)
+        except requests.RequestException as e:
+            last_error = e
+            if attempt >= total_attempts:
+                break
+            wait = LLM_RETRY_DELAY * (2 ** (attempt - 1))
+            print(f"   ⚠️ LLM 分类请求异常（第 {attempt}/{total_attempts} 次）: {e}")
+            print(f"   ⏳ {wait:g} 秒后重试...")
+            time.sleep(wait)
+
+    raise RuntimeError(f"LLM 分类调用失败，已重试 {LLM_MAX_RETRIES} 次: {last_error}")
+
+
 def classify_with_llm(title, preview):
     """调用 LLM 判断文件应归属的分类"""
     if not SUMMARY_API_KEY:
         return "其他"
-
-    api_url = SUMMARY_API_URL.rstrip("/")
-    if not api_url.endswith("/chat/completions"):
-        api_url += "/chat/completions"
 
     cats = "、".join(DEFAULT_CATEGORIES)
     prompt = (
@@ -110,29 +176,16 @@ def classify_with_llm(title, preview):
         f"标题：{title}\n\n摘要：{preview[:2000]}"
     )
     try:
-        resp = requests.post(
-            api_url,
-            json={
+        result = _post_llm(
+            {
                 "model": SUMMARY_MODEL,
                 "messages": [
                     {"role": "system", "content": "你是一个内容分类助手。只回复分类名称。"},
                     {"role": "user", "content": prompt},
                 ],
                 "max_tokens": 32,
-            },
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {SUMMARY_API_KEY}",
-            },
-            timeout=30,
-        )
-        data = resp.json()
-        if "choices" in data:
-            result = data["choices"][0]["message"]["content"].strip()
-        elif "content" in data:
-            result = data["content"].strip()
-        else:
-            return "其他"
+            }
+        ).strip()
         # 验证返回值是合法分类
         for cat in DEFAULT_CATEGORIES:
             if cat in result:

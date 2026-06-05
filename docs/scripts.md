@@ -19,6 +19,9 @@ bash scripts/bilibili_transcript.sh "https://www.bilibili.com/video/BVxxxxx/"
 # 本地目录批量转录
 bash scripts/bilibili_transcript.sh --local-dir /path/to/videos/
 
+# 递归扫描子目录
+bash scripts/bilibili_transcript.sh --local-dir /path/to/videos/ --recursive
+
 # 指定输出目录
 bash scripts/bilibili_transcript.sh --local-dir /path/to/videos/ --output-dir /custom/output/
 ```
@@ -53,7 +56,15 @@ env.local (source 加载) → 脚本默认值
 
 ### 本地目录模式
 
-扫描目录中的媒体文件（mp4/mkv/avi/mov/webm/flv/wmv/ts + mp3/m4a/wav/flac/ogg/opus/aac），视频自动用 ffmpeg 提取音轨并转 16kHz WAV，送入 ASR 引擎转录。结果保存到 `OUTPUT_DIR/local/`。
+扫描目录中的媒体文件（mp4/mkv/avi/mov/webm/flv/wmv/ts + mp3/m4a/wav/flac/ogg/opus/aac）。默认只扫描目录第一层；加 `--recursive` 后递归扫描子目录。
+
+本地模式的处理优先级：
+
+1. 已存在同名输出 Markdown → 跳过，避免重复 ASR
+2. `FORCE_ASR=false` 且存在同目录同名 `.srt` → 直接导入字幕
+3. 其他情况 → 视频自动用 ffmpeg 提取音轨并转 16kHz WAV，送入 ASR 引擎转录
+
+结果保存到 `OUTPUT_DIR/local/`。
 
 ### Python 运行方式
 
@@ -166,6 +177,15 @@ python scripts/batch_transcribe.py
 
 # 本地目录
 python scripts/batch_transcribe.py --local-dir /path/to/videos/
+
+# 本地目录，递归扫描子目录
+python scripts/batch_transcribe.py --local-dir /path/to/videos/ --recursive
+
+# 只补齐已有 Markdown 的 AI 摘要/导图/校对（默认 OUTPUT_DIR/local）
+python scripts/batch_transcribe.py --summary-only
+
+# 指定单个文件或目录补齐 AI 后处理
+python scripts/batch_transcribe.py --summary-only /path/to/output-or-file
 ```
 
 所有配置从 `env.local` 读取。
@@ -178,7 +198,9 @@ python scripts/batch_transcribe.py --local-dir /path/to/videos/
 2. **思维导图** — 缩进 Markdown 列表
 3. **对话检测 + AI 校对** — 先调用 `_detect_dialogue()` 取文本前 3000 字符判断是否为对话/访谈/多人讨论。若检测为对话，校对 prompt 会额外要求根据语义区分说话角色，输出格式如「主持人：」「嘉宾：」或「说话人A：」「说话人B：」。非对话则执行常规校对（错别字 + 断句 + 标点 + 领域术语）
 
-三阶段独立，一个失败不影响其他。LLM 调用通过 `_call_llm()` 统一处理，超时由 `LLM_TIMEOUT` 控制。
+三阶段独立，一个失败不影响其他。LLM 调用通过 `_call_llm()` 统一处理，超时由 `LLM_TIMEOUT` 控制；临时失败按 `LLM_MAX_RETRIES` 和 `LLM_RETRY_DELAY` 指数退避重试。会重试的情况包括超时、连接异常、HTTP 408/409/425/429、5xx、空响应或异常响应；HTTP 400/401/403/404 等配置错误不重试。
+
+如果转录过程中断，但 Markdown 文件已经生成，可用 `--summary-only` 直接补齐仍保留 `【AI待处理...】` 占位符的文件，避免重新执行 Whisper/ASR。
 
 ### 编码兼容
 
@@ -268,6 +290,9 @@ python scripts/organize_categories.py --category 技术 /path/to/file.md
 # 合并所有分类生成一本 EPUB
 python scripts/build_epub.py
 
+# 指定分类根目录（读取该目录下的分类子目录）
+python scripts/build_epub.py --input-dir /path/to/category-root
+
 # 指定输出目录
 python scripts/build_epub.py --output-dir ./books
 
@@ -303,6 +328,7 @@ B站视频转录合集
 
 - **剔除完整原文**：识别 `<details>` 折叠块或 `## 完整原文` 标题并移除，EPUB 只保留摘要/导图/校对
 - **分类入口页**：每个分类一个导航页，列出该分类下所有文章链接
+- **输入目录**：默认读取 `OUTPUT_DIR` 下的分类目录；`--input-dir` 可改为读取指定分类根目录
 - **末尾页**：生成日期 + 署名
 - **文件名**：`bilibili-all-YYYY-MM-DD.epub`，日期自动取当天
 - **零依赖**：直接生成 EPUB 3.0 标准的 XML/ZIP 包，兼容 iBooks / Kindle / 各类阅读器

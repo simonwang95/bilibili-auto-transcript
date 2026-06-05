@@ -31,6 +31,7 @@ FORCE_ASR="${FORCE_ASR:-false}"
 
 # ===== 解析命令行参数 =====
 LOCAL_DIR=""
+LOCAL_RECURSIVE=false
 VIDEO_URL=""
 
 while [[ $# -gt 0 ]]; do
@@ -38,6 +39,10 @@ while [[ $# -gt 0 ]]; do
         --local-dir)
             LOCAL_DIR="$2"
             shift 2
+            ;;
+        --recursive)
+            LOCAL_RECURSIVE=true
+            shift
             ;;
         --output-dir)
             OUTPUT_DIR="$2"
@@ -196,6 +201,17 @@ to_simplified() {
     else
         cat
     fi
+}
+
+extract_srt_text() {
+    local srt_file="$1"
+    awk '
+        { sub(/\r$/, "") }
+        /^[[:space:]]*$/ { next }
+        /^[[:space:]]*[0-9]+[[:space:]]*$/ { next }
+        /-->/ { next }
+        { print }
+    ' "$srt_file"
 }
 
 run_asr_transcribe() {
@@ -490,10 +506,16 @@ transcribe_bilibili_url() {
 # ===== 本地文件转录 =====
 transcribe_local_file() {
     local file_path="$1"
+    local file_index="${2:-}"
+    local file_total="${3:-}"
     local filename
     filename=$(basename "$file_path")
+    local file_label="$filename"
+    if [ -n "$file_index" ] && [ -n "$file_total" ]; then
+        file_label="[$file_index/$file_total] $filename"
+    fi
 
-    echo "🎬 本地文件: $filename"
+    echo "🎬 本地文件: $file_label"
 
     # 提取音频（如果是视频文件）
     local ext="${filename##*.}"
@@ -501,16 +523,49 @@ transcribe_local_file() {
     local video_exts="mp4 mkv avi mov webm flv wmv ts"
 
     local audio_input="$file_path"
+    local base_name="${filename%.*}"
+    local SAFE_NAME; SAFE_NAME=$(echo "$base_name" | to_safe_name)
+    local NOW; NOW=$(date '+%Y-%m-%d')
+    local LOCAL_OUT="${OUTPUT_DIR}/local"
+    mkdir -p "$LOCAL_OUT"
+
+    # 去重：已有 Markdown 时直接返回，避免重复执行 Whisper/ASR。
+    local EXISTING
+    EXISTING=$(find "$LOCAL_OUT" -maxdepth 1 -name "${SAFE_NAME}_*.md" -type f 2>/dev/null | head -1)
+    if [ -n "$EXISTING" ]; then
+        echo "   ⏭️  $file_label: 已存在转录文件: $(basename "$EXISTING")，跳过 ASR"
+        echo "$EXISTING"
+        return 0
+    fi
+
+    # FORCE_ASR=false 时，优先使用同目录同名 .srt 字幕，避免不必要的 ASR。
+    local subtitle_file="${file_path%.*}.srt"
+    if [ "${FORCE_ASR:-false}" != "true" ] && [ -f "$subtitle_file" ] && [ -s "$subtitle_file" ]; then
+        echo "   📝 $file_label: 发现同名 SRT 字幕，优先使用: $(basename "$subtitle_file")"
+        local subtitle_text
+        subtitle_text=$(extract_srt_text "$subtitle_file" | to_simplified)
+
+        if [ -n "$subtitle_text" ]; then
+            local subtitle_output="${LOCAL_OUT}/${SAFE_NAME}_${NOW}.md"
+            echo "   📝 $file_label: 写入 Markdown: $(basename "$subtitle_output")"
+            write_output_file "$subtitle_output" "$base_name" "file://$file_path" "本地文件" "$NOW" "未知" "本地SRT字幕" "$subtitle_text"
+            echo "   ✅ $file_label: 字幕导入完成 → $(basename "$subtitle_output")"
+            echo "$subtitle_output"
+            return 0
+        fi
+
+        echo "   ⚠️  $file_label: 同名 SRT 字幕为空，回落到 ASR"
+    fi
 
     if echo "$video_exts" | grep -qw "$ext"; then
-        echo "   🎬 检测到视频格式，提取音频..."
+        echo "   🎬 $file_label: 检测到视频格式，提取音频..."
         local audio_out="${CACHE_DIR}/local_audio_$$.wav"
         ffmpeg -y -i "$file_path" -vn -ar 16000 -ac 1 "$audio_out" 2>/dev/null
         if [ -f "$audio_out" ] && [ -s "$audio_out" ]; then
             audio_input="$audio_out"
-            echo "   ✅ 音频已提取"
+            echo "   ✅ $file_label: 音频已提取"
         else
-            echo "   ⚠️  ffmpeg 提取音频失败，尝试直接输入"
+            echo "   ⚠️  $file_label: ffmpeg 提取音频失败，尝试直接输入"
         fi
     elif [ "$ext" = "wav" ]; then
         # 检查是否需要重新采样
@@ -519,32 +574,38 @@ transcribe_local_file() {
         local channels
         channels=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels -of default=noprint_wrappers=1:nokey=1 "$file_path" 2>/dev/null)
         if [ "$sample_rate" != "16000" ] || [ "$channels" != "1" ]; then
-            echo "   🔄 音频格式优化（16kHz 单声道）..."
+            echo "   🔄 $file_label: 音频格式优化（16kHz 单声道）..."
             local wav_out="${CACHE_DIR}/local_audio_$$.wav"
             ffmpeg -y -i "$file_path" -ar 16000 -ac 1 "$wav_out" 2>/dev/null
             if [ -f "$wav_out" ] && [ -s "$wav_out" ]; then
                 audio_input="$wav_out"
-                echo "   ✅ 音频已优化"
+                echo "   ✅ $file_label: 音频已优化"
+            else
+                echo "   ⚠️  $file_label: 音频格式优化失败，尝试直接输入"
             fi
+        else
+            echo "   ✅ $file_label: WAV 已是 16kHz 单声道，无需转换"
         fi
     else
         # 其他音频格式统一转换
-        echo "   🔄 音频格式优化（16kHz 单声道）..."
+        echo "   🔄 $file_label: 音频格式优化（16kHz 单声道）..."
         local wav_out="${CACHE_DIR}/local_audio_$$.wav"
         ffmpeg -y -i "$file_path" -ar 16000 -ac 1 "$wav_out" 2>/dev/null
         if [ -f "$wav_out" ] && [ -s "$wav_out" ]; then
             audio_input="$wav_out"
-            echo "   ✅ 音频已优化"
+            echo "   ✅ $file_label: 音频已优化"
+        else
+            echo "   ⚠️  $file_label: 音频格式优化失败，尝试直接输入"
         fi
     fi
 
-    # Qwen3-ASR 转录
-    echo "   🎤 开始语音转文字..."
+    # 本地 ASR 转录
+    echo "   🎤 $file_label: 开始语音转文字..."
     local q3_output="${CACHE_DIR}/.qwen_transcript.txt"
     run_asr_transcribe "$audio_input" "$q3_output"
 
     if [ ! -f "$q3_output" ] || [ ! -s "$q3_output" ]; then
-        echo "❌ Qwen3-ASR 转录失败"
+        echo "❌ $file_label: ASR 转录失败"
         rm -f "$q3_output"
         return 1
     fi
@@ -557,26 +618,12 @@ transcribe_local_file() {
     TRANSCRIPT_TEXT=$(echo "$TRANSCRIPT_TEXT" | to_simplified)
 
     # 生成输出文件
-    local base_name="${filename%.*}"
-    local SAFE_NAME; SAFE_NAME=$(echo "$base_name" | to_safe_name)
-    local NOW; NOW=$(date '+%Y-%m-%d')
-    local LOCAL_OUT="${OUTPUT_DIR}/local"
-    mkdir -p "$LOCAL_OUT"
-
-    # 去重：检查是否已有同名前缀的 .md 文件（不同日期生成的文件算同一个）
-    local EXISTING
-    EXISTING=$(find "$LOCAL_OUT" -maxdepth 1 -name "${SAFE_NAME}_*.md" -type f 2>/dev/null | head -1)
-    if [ -n "$EXISTING" ]; then
-        echo "   ⏭️  已存在转录文件: $(basename "$EXISTING")，跳过"
-        echo "$EXISTING"
-        return 0
-    fi
-
     local OUTPUT_FILE="${LOCAL_OUT}/${SAFE_NAME}_${NOW}.md"
 
+    echo "   📝 $file_label: 写入 Markdown: $(basename "$OUTPUT_FILE")"
     write_output_file "$OUTPUT_FILE" "$base_name" "file://$file_path" "本地文件" "$NOW" "未知" "$TRANSCRIPT_SOURCE" "$TRANSCRIPT_TEXT"
 
-    echo "   ✅ 转录完成 → $(basename "$OUTPUT_FILE")"
+    echo "   ✅ $file_label: 转录完成 → $(basename "$OUTPUT_FILE")"
     echo "$OUTPUT_FILE"
 }
 
@@ -646,6 +693,9 @@ if [ -n "$LOCAL_DIR" ]; then
     fi
 
     echo "📁 扫描本地目录: $LOCAL_DIR"
+    if [ "$LOCAL_RECURSIVE" = "true" ]; then
+        echo "   🔁 递归扫描子目录: 已启用"
+    fi
     echo ""
 
     # 支持的媒体格式
@@ -654,10 +704,17 @@ if [ -n "$LOCAL_DIR" ]; then
               -o -name "*.mp3" -o -name "*.m4a" -o -name "*.wav" -o -name "*.flac" \
               -o -name "*.ogg" -o -name "*.opus" -o -name "*.aac")
 
-    files=$(find "$LOCAL_DIR" -maxdepth 1 -type f \( "${patterns[@]}" \) 2>/dev/null | sort)
+    if [ "$LOCAL_RECURSIVE" = "true" ]; then
+        files=$(find "$LOCAL_DIR" -type f \( "${patterns[@]}" \) 2>/dev/null | sort)
+    else
+        files=$(find "$LOCAL_DIR" -maxdepth 1 -type f \( "${patterns[@]}" \) 2>/dev/null | sort)
+    fi
 
     if [ -z "$files" ]; then
         echo "❌ 目录中没有找到支持的媒体文件"
+        if [ "$LOCAL_RECURSIVE" != "true" ]; then
+            echo "   如需扫描子目录，请加 --recursive"
+        fi
         echo "   支持格式: mp4, mkv, avi, mov, webm, flv, wmv, ts, mp3, m4a, wav, flac, ogg, opus, aac"
         exit 1
     fi
@@ -666,13 +723,16 @@ if [ -n "$LOCAL_DIR" ]; then
     echo "📊 找到 $count 个媒体文件"
     echo ""
 
-    success=0 fail=0
+    success=0 fail=0 current=0
     while IFS= read -r f; do
+        current=$((current + 1))
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        if transcribe_local_file "$f"; then
+        if transcribe_local_file "$f" "$current" "$count"; then
             success=$((success + 1))
+            echo "✅ [$current/$count] $(basename "$f") 处理成功"
         else
             fail=$((fail + 1))
+            echo "❌ [$current/$count] $(basename "$f") 处理失败"
         fi
     done <<< "$files"
 
@@ -690,6 +750,7 @@ if [ -z "$VIDEO_URL" ]; then
     echo ""
     echo "选项:"
     echo "  --local-dir <目录>    批量转录本地目录中的媒体文件"
+    echo "  --recursive           本地目录模式下递归扫描子目录"
     echo "  --output-dir <目录>   输出目录（默认: $OUTPUT_DIR）"
     echo ""
     echo "配置: 编辑项目根目录的 env.local 文件"

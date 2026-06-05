@@ -87,13 +87,13 @@ ffmpeg 转 16kHz 单声道 WAV（统一格式，兼容性最佳）
 
 ## 三、本地文件转录模式（v5.0 新增）
 
-当传入 `--local-dir <目录>` 时，脚本跳过 B站 API 和字幕检测，直接进入 ASR 语音转文字流程。结果保存到 `OUTPUT_DIR/local/`。
+当传入 `--local-dir <目录>` 时，脚本跳过 B站 API。若 `FORCE_ASR=false` 且媒体文件旁存在同目录同名 `.srt` 字幕，则优先导入字幕；否则进入 ASR 语音转文字流程。结果保存到 `OUTPUT_DIR/local/`。
 
 ### 与在线模式的区别
 
 | 阶段 | B站在线模式 | 本地文件模式 |
 |------|------------|------------|
-| 字幕检测 | CC → AI → 兜底 → ASR | 无，直接 ASR |
+| 字幕检测 | CC → AI → 兜底 → ASR | 同名 `.srt`（`FORCE_ASR=false`）→ ASR |
 | 元数据 | yt-dlp 从 B站 API 获取 | 文件名作为标题 |
 | 音频处理 | yt-dlp 下载 → ffmpeg 转 WAV | 视频提取音轨 → ffmpeg 转 WAV |
 | 输出目录 | `YYYY-MM/` 按当前年月分目录 | `local/` 统一子目录 |
@@ -227,6 +227,7 @@ ALL_CAUGHT_UP
 - CC 字幕 / AI 字幕下载失败 → 重试（快速，无模型加载开销）
 - Qwen3-ASR 转录失败 → 不重试（模型加载耗时，失败通常是模型或音频问题）
 - 重试间隔随尝试次数递增（`BATCH_DELAY * attempt` 秒）
+- LLM 后处理请求失败 → 对超时、连接异常、HTTP 408/409/425/429、5xx、空响应或异常响应按 `LLM_MAX_RETRIES` 重试，等待时间按 `LLM_RETRY_DELAY` 指数退避；400/401/403/404 等配置错误不重试
 
 ### 进度预估
 

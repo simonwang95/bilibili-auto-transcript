@@ -6,8 +6,10 @@ B站视频转录 + 收藏夹扫描 + 本地文件转录。双引擎 ASR（Qwen3-
 
 - **三模式转录**：B站单视频、收藏夹批量、本地文件目录
 - **三级字幕降级**（B站）：CC 字幕 → AI 字幕 → ASR 本地转录
+- **本地字幕优先**：本地媒体在 `FORCE_ASR=false` 时优先导入同名 `.srt`
 - **双引擎 ASR**：Qwen3-ASR（中文 CER ~3.8%）或 Whisper v3 Turbo（MLX 加速）
 - **LLM 后处理**：结构化摘要 + 思维导图 + AI 校对（领域术语检查）
+- **后处理中断恢复**：`--summary-only` 可为已有 Markdown 补齐摘要/导图/校对，无需重新 ASR
 - **断点续传**：avid 去重，中断后自动跳过已处理视频
 - **Markdown 输出**：按发布日期分目录（`YYYY-MM/`），本地文件保存到 `local/`
 - **统一配置**：所有参数集中在 `env.local`，无需改代码
@@ -30,6 +32,8 @@ yt-dlp --version && ffmpeg -version
 # 4. 运行
 python scripts/batch_transcribe.py                     # B站收藏夹
 python scripts/batch_transcribe.py --local-dir ./videos/  # 本地目录
+python scripts/batch_transcribe.py --local-dir ./videos/ --recursive  # 本地目录（含子目录）
+python scripts/batch_transcribe.py --summary-only      # 仅补齐已有 Markdown 的 AI 后处理
 bash scripts/bilibili_transcript.sh "https://www.bilibili.com/video/BVxxxxx/"  # 单视频
 ```
 
@@ -45,6 +49,7 @@ FORCE_ASR="true"                                              # 跳过 B站字�
 SUMMARY_API_KEY="lm-studio"                                   # LLM API Key
 SUMMARY_API_URL="http://127.0.0.1:1234/v1"                    # LM Studio / Ollama
 SUMMARY_MODEL="qwen3.6-27b-ud-mlx"
+LLM_MAX_RETRIES="2"                                           # LLM 临时失败重试次数
 COOLDOWN_DELAY="30"                                           # 视频间散热等待（秒）
 PROOFREAD_DOMAINS="finance,computer"                          # 校对领域（支持对话检测）
 ```

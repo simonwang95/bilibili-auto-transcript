@@ -8,8 +8,9 @@
   视频标题 → 二级目录（子章节）
 
 用法：
-  python scripts/build_epub.py                     # 合并所有分类
-  python scripts/build_epub.py --output-dir ./books # 指定输出目录
+  python scripts/build_epub.py                      # 合并 OUTPUT_DIR 下所有分类
+  python scripts/build_epub.py --input-dir ./notes  # 指定分类根目录
+  python scripts/build_epub.py --output-dir ./books # 指定 EPUB 输出目录
 """
 
 from __future__ import annotations
@@ -417,12 +418,12 @@ def zip_epub(build_dir: Path, output: Path) -> None:
 
 # ── 主逻辑 ─────────────────────────────────────────────────────
 
-def list_category_dirs() -> list[Path]:
-    if not OUTPUT_DIR.is_dir():
+def list_category_dirs(root_dir: Path) -> list[Path]:
+    if not root_dir.is_dir():
         return []
     dirs = []
-    for name in sorted(os.listdir(OUTPUT_DIR)):
-        full = OUTPUT_DIR / name
+    for name in sorted(os.listdir(root_dir)):
+        full = root_dir / name
         if full.is_dir() and name not in SKIP_DIRS and not DATE_DIR_RE.match(name):
             dirs.append(full)
     return dirs
@@ -443,17 +444,19 @@ def title_from_markdown(text: str, fallback: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="合并分类目录生成 EPUB")
+    parser.add_argument("--input-dir", type=Path, default=None, help="分类根目录（默认读取 OUTPUT_DIR）")
     parser.add_argument("--output-dir", type=Path, default=None, help="EPUB 输出目录")
     parser.add_argument("--title", default="B站视频转录合集", help="EPUB 标题")
     parser.add_argument("--author", default="Bilibili Auto Transcript", help="EPUB 作者")
     parser.add_argument("--keep-build", action="store_true", help="保留临时构建目录")
     args = parser.parse_args()
 
+    input_dir = args.input_dir.expanduser().resolve() if args.input_dir else OUTPUT_DIR
     epub_dir = args.output_dir.resolve() if args.output_dir else EPUB_OUTPUT_DIR
 
-    category_dirs = list_category_dirs()
+    category_dirs = list_category_dirs(input_dir)
     if not category_dirs:
-        print("没有找到分类目录")
+        print(f"没有找到分类目录: {input_dir}")
         return 2
 
     # 组装数据
@@ -503,6 +506,8 @@ def main() -> int:
 
     print("=" * 60)
     print("📚 生成 EPUB")
+    print(f"📂 输入目录: {input_dir}")
+    print(f"📦 输出目录: {epub_dir}")
     print("=" * 60)
 
     for section_idx, (group_title, notes) in enumerate(groups, start=1):

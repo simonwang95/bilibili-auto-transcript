@@ -74,6 +74,8 @@ SUMMARY_API_URL = _env.get("SUMMARY_API_URL", "https://api.openai.com/v1/chat/co
 SUMMARY_MODEL = _env.get("SUMMARY_MODEL", "gpt-4o-mini")
 SUMMARY_MAX_TOKENS = int(_env.get("SUMMARY_MAX_TOKENS", "1024"))
 LLM_TIMEOUT = int(_env.get("LLM_TIMEOUT", "600"))
+LLM_MAX_RETRIES = max(0, int(_env.get("LLM_MAX_RETRIES", "2")))
+LLM_RETRY_DELAY = max(0.0, float(_env.get("LLM_RETRY_DELAY", "3")))
 PROOFREAD_DOMAINS = _env.get("PROOFREAD_DOMAINS", "").strip()
 
 os.makedirs(STATE_DIR, exist_ok=True)
@@ -241,14 +243,20 @@ def transcribe_video(bvid, attempt=1, max_retries=1):
         return False, error_msg, None, used_stt
 
 
-def transcribe_local_dir(local_dir):
+def transcribe_local_dir(local_dir, recursive=False):
     """转录本地目录中的所有媒体文件"""
     print(f"\n{'='*70}")
     print(f"📁 本地目录转录: {local_dir}")
+    if recursive:
+        print("🔁 递归扫描子目录: 已启用")
     print(f"{'='*70}")
 
+    cmd = ["bash", TRANSCRIPT_SH, "--local-dir", local_dir, "--output-dir", OUTPUT_DIR]
+    if recursive:
+        cmd.append("--recursive")
+
     result = _safe_subprocess(
-        ["bash", TRANSCRIPT_SH, "--local-dir", local_dir, "--output-dir", OUTPUT_DIR],
+        cmd,
         cwd=SKILL_DIR, timeout=7200,
     )
 
@@ -266,8 +274,12 @@ def transcribe_local_dir(local_dir):
     return output_files, result.returncode
 
 
-def _call_llm(system_prompt, user_prompt, max_tokens=None):
-    """调用 LLM，返回响应文本或 None"""
+def _is_retryable_http_status(status_code):
+    return status_code in (408, 409, 425, 429) or status_code >= 500
+
+
+def _call_llm(system_prompt, user_prompt, max_tokens=None, task_name="LLM", max_retries=None):
+    """调用 LLM，返回响应文本或 None。临时错误按配置重试。"""
     if not SUMMARY_API_KEY:
         return None
 
@@ -283,23 +295,63 @@ def _call_llm(system_prompt, user_prompt, max_tokens=None):
         ],
         "max_tokens": max_tokens or SUMMARY_MAX_TOKENS,
     }
-    resp = requests.post(
-        api_url,
-        json=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {SUMMARY_API_KEY}",
-        },
-        timeout=LLM_TIMEOUT,
-    )
-    resp_data = resp.json()
-    # LM Studio 等本地服务可能不返回 choices
-    if "choices" in resp_data:
-        return resp_data["choices"][0]["message"]["content"]
-    elif "content" in resp_data:
-        return resp_data["content"]
-    else:
-        raise ValueError(f"Unexpected response: {resp_data}")
+    retry_count = LLM_MAX_RETRIES if max_retries is None else max(0, max_retries)
+    total_attempts = max(1, retry_count + 1)
+    last_error = None
+
+    for attempt in range(1, total_attempts + 1):
+        try:
+            resp = requests.post(
+                api_url,
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {SUMMARY_API_KEY}",
+                },
+                timeout=LLM_TIMEOUT,
+            )
+
+            if resp.status_code >= 400:
+                preview = resp.text.strip()[:500]
+                msg = f"HTTP {resp.status_code}: {preview or resp.reason}"
+                if not _is_retryable_http_status(resp.status_code):
+                    raise RuntimeError(msg)
+                raise requests.HTTPError(msg, response=resp)
+
+            resp_data = resp.json()
+            # LM Studio 等本地服务可能不返回 choices
+            if "choices" in resp_data:
+                content = resp_data["choices"][0]["message"]["content"]
+            elif "content" in resp_data:
+                content = resp_data["content"]
+            else:
+                raise ValueError(f"Unexpected response: {resp_data}")
+
+            if not content or not content.strip():
+                raise ValueError("Empty LLM response")
+
+            return content
+
+        except RuntimeError:
+            raise
+        except (requests.Timeout, requests.ConnectionError, requests.HTTPError, ValueError) as e:
+            last_error = e
+            if attempt >= total_attempts:
+                break
+            wait = LLM_RETRY_DELAY * (2 ** (attempt - 1))
+            print(f"   ⚠️ {task_name} 调用失败（第 {attempt}/{total_attempts} 次）: {e}")
+            print(f"   ⏳ {wait:g} 秒后重试...")
+            time.sleep(wait)
+        except requests.RequestException as e:
+            last_error = e
+            if attempt >= total_attempts:
+                break
+            wait = LLM_RETRY_DELAY * (2 ** (attempt - 1))
+            print(f"   ⚠️ {task_name} 请求异常（第 {attempt}/{total_attempts} 次）: {e}")
+            print(f"   ⏳ {wait:g} 秒后重试...")
+            time.sleep(wait)
+
+    raise RuntimeError(f"{task_name} 调用失败，已重试 {retry_count} 次: {last_error}")
 
 
 def _detect_dialogue(text, sample_chars=3000):
@@ -312,11 +364,12 @@ def _detect_dialogue(text, sample_chars=3000):
     try:
         result = _call_llm(
             "你是一个文本分析助手。请判断以下转录文本是否属于对话/访谈/多人讨论类型。"
-            "只回复「是」或「否」。\n"
+            "不要输出思考过程，只回复一个字：「是」或「否」。如果无法判断，回复「否」。\n"
             "判断依据：是否出现明显的多人轮流发言特征，如问答交替、观点交锋、"
             "不同语气或立场切换、明显的说话人切换等。",
             f"转录文本片段：\n{sample}",
-            max_tokens=8,
+            task_name="对话检测",
+            max_retries=0,
         )
         if result and "是" in result:
             return True
@@ -473,6 +526,7 @@ def generate_summary(filepath):
                 "你是一个视频摘要助手。请对以下转录文本生成结构化摘要，"
                 "包含：1) 核心观点 2) 主要论点 3) 关键结论。用中文回复，简洁明了。",
                 f"视频标题：{title}\n\n转录文本：\n{transcript_text}",
+                task_name="摘要生成",
             )
             if summary:
                 # 用 replace 精确匹配（old_summary_ph 和 new ph 不同）
@@ -497,6 +551,7 @@ def generate_summary(filepath):
                 "要求：层次清晰、要点精炼、覆盖全文核心内容。",
                 f"视频标题：{title}\n\n转录文本：\n{transcript_text}",
                 max_tokens=SUMMARY_MAX_TOKENS,
+                task_name="思维导图生成",
             )
             if mindmap:
                 content = content.replace(placeholders[1], mindmap.strip())
@@ -550,6 +605,7 @@ def generate_summary(filepath):
                 proofread_prompt,
                 f"视频标题：{title}\n\n原始转录文本：\n{transcript_text}",
                 max_tokens=SUMMARY_MAX_TOKENS,
+                task_name="AI校对",
             )
             if proofread:
                 content = content.replace(placeholders[2], proofread.strip())
@@ -578,11 +634,93 @@ def print_summary_stats(report_rows):
             print(f"      - {src}: {count} 个")
 
 
+def _list_markdown_files(path):
+    if os.path.isfile(path):
+        return [path] if path.endswith(".md") else []
+
+    files = []
+    for root, dirs, names in os.walk(path):
+        dirs[:] = [d for d in dirs if d not in {"epub", "epub-build"}]
+        for name in names:
+            if name.endswith(".md"):
+                files.append(os.path.join(root, name))
+    return sorted(files)
+
+
+def run_summary_only(target_path=None):
+    """只为已有 Markdown 文件补齐 LLM 摘要/导图/校对。"""
+    if not SUMMARY_API_KEY:
+        print("❌ 未设置 SUMMARY_API_KEY，无法执行 LLM 后处理")
+        return 1
+
+    target = _expand_path(target_path) if target_path else os.path.join(OUTPUT_DIR, "local")
+    if not os.path.exists(target):
+        print(f"❌ 路径不存在: {target}")
+        return 1
+
+    files = _list_markdown_files(target)
+    if not files:
+        print(f"❌ 没有找到 Markdown 文件: {target}")
+        return 1
+
+    print("=" * 70)
+    print("📝 仅补齐 AI 后处理")
+    print("=" * 70)
+    print(f"📂 目标: {target}")
+    print(f"📄 Markdown 文件: {len(files)} 个")
+
+    changed_count = 0
+    skipped_count = 0
+    failed_count = 0
+    start_time = time.time()
+
+    for i, filepath in enumerate(files, 1):
+        print(f"\n📄 [{i}/{len(files)}] {os.path.basename(filepath)}")
+        changed = False
+        try:
+            changed = generate_summary(filepath)
+        except Exception as e:
+            failed_count += 1
+            print(f"   ⚠️ AI 后处理异常: {e}")
+            continue
+
+        if changed:
+            changed_count += 1
+            if COOLDOWN_DELAY > 0 and i < len(files):
+                print(f"   🥶 LLM 散热等待 {COOLDOWN_DELAY} 秒...")
+                time.sleep(COOLDOWN_DELAY)
+        else:
+            skipped_count += 1
+            print("   ⏭️  无待处理占位符，跳过")
+
+    total_time = time.time() - start_time
+    print(f"\n{'=' * 70}")
+    print("📊 AI 后处理完成")
+    print(f"   写入: {changed_count} 个")
+    print(f"   跳过: {skipped_count} 个")
+    print(f"   失败: {failed_count} 个")
+    print(f"   耗时: {int(total_time // 60)}分{int(total_time % 60)}秒")
+    print(f"{'=' * 70}")
+    return 1 if failed_count else 0
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="B站收藏夹批量转录")
     parser.add_argument("--local-dir", default=None, help="转录本地目录中的媒体文件")
+    parser.add_argument("--recursive", action="store_true", help="本地目录模式下递归扫描子目录")
+    parser.add_argument(
+        "--summary-only",
+        nargs="?",
+        const="",
+        default=None,
+        help="只为已有 Markdown 补齐 LLM 后处理，可选指定文件或目录（默认 OUTPUT_DIR/local）",
+    )
     args = parser.parse_args()
+
+    # ===== 模式：仅补齐 LLM 后处理 =====
+    if args.summary_only is not None:
+        return run_summary_only(args.summary_only or None)
 
     # ===== 模式：本地目录转录 =====
     if args.local_dir:
@@ -596,18 +734,19 @@ def main():
         print("=" * 70)
 
         start_time = time.time()
-        output_files, returncode = transcribe_local_dir(local_dir)
+        output_files, returncode = transcribe_local_dir(local_dir, recursive=args.recursive)
 
         # 生成摘要
         if SUMMARY_API_KEY and output_files:
             print(f"\n📝 生成 AI 摘要...")
             for i, f in enumerate(output_files):
+                changed = False
                 try:
-                    generate_summary(f)
+                    changed = generate_summary(f)
                 except Exception as e:
                     print(f"   ⚠️ 摘要生成异常: {e}")
                 # LLM 散热
-                if COOLDOWN_DELAY > 0 and i < len(output_files) - 1:
+                if changed and COOLDOWN_DELAY > 0 and i < len(output_files) - 1:
                     print(f"   🥶 LLM 散热等待 {COOLDOWN_DELAY} 秒...")
                     time.sleep(COOLDOWN_DELAY)
 
@@ -706,12 +845,13 @@ def main():
 
             # AI摘要生成
             if enable_summary and output_file and output_file != "unknown":
+                changed = False
                 try:
-                    generate_summary(output_file)
+                    changed = generate_summary(output_file)
                 except Exception as e:
                     print(f"   ⚠️ 摘要生成异常: {e}")
                 # LLM 散热
-                if COOLDOWN_DELAY > 0 and i < len(pending):
+                if changed and COOLDOWN_DELAY > 0 and i < len(pending):
                     print(f"   🥶 LLM 散热等待 {COOLDOWN_DELAY} 秒...")
                     time.sleep(COOLDOWN_DELAY)
 

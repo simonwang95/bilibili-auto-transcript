@@ -103,6 +103,8 @@ SUMMARY_API_URL="http://127.0.0.1:1234/v1"
 SUMMARY_MODEL="qwen3.6-27b-ud-mlx"
 SUMMARY_MAX_TOKENS="16000"
 LLM_TIMEOUT="600"
+LLM_MAX_RETRIES="2"
+LLM_RETRY_DELAY="3"
 COOLDOWN_DELAY="30"
 
 # 校对领域 + 对话检测
@@ -116,11 +118,14 @@ PROOFREAD_DOMAINS="finance,computer"
 |------|------|
 | 转录 B站收藏夹 | `python scripts/batch_transcribe.py` |
 | 转录本地目录 | `python scripts/batch_transcribe.py --local-dir <目录>` |
+| 递归转录本地目录 | `python scripts/batch_transcribe.py --local-dir <目录> --recursive` |
+| 补齐 AI 后处理 | `python scripts/batch_transcribe.py --summary-only [文件或目录]` |
 | 单个 B站视频 | `bash scripts/bilibili_transcript.sh "<URL>"` |
 | 只扫描不转录 | `python scripts/bilibili_scanner.py` |
 | 分类整理文件 | `python scripts/organize_categories.py` |
 | 预览分类 | `python scripts/organize_categories.py --dry-run` |
 | 导出 EPUB（合并） | `python scripts/build_epub.py` |
+| 导出指定目录 EPUB | `python scripts/build_epub.py --input-dir <分类根目录>` |
 
 ## 外部依赖
 

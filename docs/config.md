@@ -67,7 +67,7 @@ pip install mlx-whisper
 |--------|--------|------|
 | `ASR_ENGINE` | `"qwen3"` | 语音转文字引擎：`qwen3`（中文 CER ~3.8%）或 `whisper`（MLX 加速，Apple Silicon 原生优化） |
 | `ASR_LOCAL_MODEL` | `""` | 本地模型路径。相对路径以项目根目录为基准。Whisper 示例：`"/Users/wyq/.lmstudio/models/mlx-community/whisper-large-v3-turbo"` |
-| `FORCE_ASR` | `"false"` | 设为 `true` 跳过 B站 CC/AI 字幕检测，强制用本地 ASR 转录 |
+| `FORCE_ASR` | `"false"` | 设为 `true` 跳过字幕检测，强制用本地 ASR 转录。B站模式跳过 CC/AI 字幕；本地模式跳过同名 `.srt` 字幕 |
 | `FORCE_ASR_CPU` | `"false"` | Qwen3-ASR 专用。Apple Silicon 上 MPS 可能内存超限（47GB），设为 `true` 强制 CPU 推理 |
 | `ASR_LANGUAGE` | `""` | Whisper 转录语言。默认空字符串=自动检测，非中文内容保留原语言。纯中文视频可设为 `zh` 强制提高准确率（但会丢失英文等非中文内容） |
 
@@ -82,6 +82,8 @@ pip install mlx-whisper
 | `SUMMARY_MODEL` | `"gpt-4o-mini"` | 三阶段共用的模型名称 |
 | `SUMMARY_MAX_TOKENS` | `"1024"` | 每次 LLM 调用的最大 token 数 |
 | `LLM_TIMEOUT` | `"600"` | LLM API 读取超时（秒），默认 600 适用于本地模型长文本 |
+| `LLM_MAX_RETRIES` | `"2"` | LLM 请求失败后的最大重试次数。默认最多请求 3 次（首次 + 2 次重试） |
+| `LLM_RETRY_DELAY` | `"3"` | LLM 重试基础等待秒数，按 1x / 2x / 4x 指数退避 |
 | `PROOFREAD_DOMAINS` | `""` | 校对时关注的专有领域，逗号分隔。可选：finance / computer / medical / legal / engineering。留空默认启用金融+计算机 |
 
 设置 `SUMMARY_API_KEY` 后，每个转录完成会自动执行：
@@ -90,7 +92,7 @@ pip install mlx-whisper
 2. **思维导图** — 缩进 Markdown 列表格式
 3. **对话检测 + AI 校对** — 先判断转录是否为对话/访谈类型。若是，校对时自动根据语义区分说话角色（标注为「主持人：」「嘉宾：」或「说话人A：」「说话人B：」）；非对话则执行常规校对（同音错别字 + 断句 + 标点 + 领域术语检查）
 
-三个阶段独立运行，一个失败不影响其他。
+三个阶段独立运行，一个失败不影响其他。LLM 请求会对超时、连接异常、HTTP 408/409/425/429、5xx、空响应或异常响应做重试；HTTP 400/401/403/404 等配置错误不重试，直接失败。
 
 ### 转录行为
 
@@ -129,15 +131,26 @@ FORCE_ASR="true"
 
 # 启动
 python scripts/batch_transcribe.py --local-dir "/path/to/videos/"
+
+# 如需递归扫描子目录
+python scripts/batch_transcribe.py --local-dir "/path/to/videos/" --recursive
 ```
 
-流程：扫描目录媒体文件 → ffmpeg 提取/转换音频 → ASR 转录 → LLM 摘要/导图/校对。结果保存到 `bilibili/local/`。不涉及 B站 API，不走去重。
+流程：扫描目录媒体文件 → 若 `FORCE_ASR=false` 且存在同目录同名 `.srt`，优先导入字幕 → 否则 ffmpeg 提取/转换音频 → ASR 转录 → LLM 摘要/导图/校对。默认只扫描目录第一层；加 `--recursive` 后递归扫描子目录。结果保存到 `bilibili/local/`。不涉及 B站 API，不走去重。
+
+如果进程在 ASR 完成后、LLM 后处理完成前中断，不需要删除已生成的 Markdown。直接运行：
+
+```bash
+python scripts/batch_transcribe.py --summary-only
+```
+
+该命令默认扫描 `OUTPUT_DIR/local`，只补齐仍保留 `【AI待处理...】` 占位符的文件；也可以追加单个文件或目录路径。
 
 ### 场景对比
 
 | | 场景 A：收藏夹 | 场景 B：本地文件夹 |
 |---|---|---|
-| 命令 | `python scripts/batch_transcribe.py` | `python scripts/batch_transcribe.py --local-dir <目录>` |
+| 命令 | `python scripts/batch_transcribe.py` | `python scripts/batch_transcribe.py --local-dir <目录>`，递归扫描加 `--recursive` |
 | 输入来源 | B站收藏夹 API | 本地文件系统 |
 | 转录策略 | CC → AI → ASR 三级降级 | 直接 ASR |
 | 输出目录 | `bilibili/YYYY-MM/` | `bilibili/local/` |
@@ -150,4 +163,4 @@ python scripts/batch_transcribe.py --local-dir "/path/to/videos/"
 
 ## 优先级规则
 
-命令行参数 > env.local > 脚本默认值。例如 `--output-dir /tmp/out` 覆盖 `env.local` 中的 `OUTPUT_DIR`。
+命令行参数 > env.local > 脚本默认值。例如 `--output-dir /tmp/out` 覆盖 `env.local` 中的 `OUTPUT_DIR`；`build_epub.py --input-dir /path/to/root` 会覆盖 EPUB 读取的分类根目录。
