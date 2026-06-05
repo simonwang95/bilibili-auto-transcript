@@ -15,6 +15,7 @@
 import csv
 import hashlib
 import os
+import select
 import subprocess
 import sys
 import time
@@ -77,6 +78,7 @@ LLM_TIMEOUT = int(_env.get("LLM_TIMEOUT", "600"))
 LLM_MAX_RETRIES = max(0, int(_env.get("LLM_MAX_RETRIES", "2")))
 LLM_RETRY_DELAY = max(0.0, float(_env.get("LLM_RETRY_DELAY", "3")))
 PROOFREAD_DOMAINS = _env.get("PROOFREAD_DOMAINS", "").strip()
+ENABLE_DIALOGUE_DETECTION = _env.get("ENABLE_DIALOGUE_DETECTION", "false").strip().lower() == "true"
 
 os.makedirs(STATE_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -141,6 +143,57 @@ def _safe_subprocess(args, **kwargs):
     result.stdout = result.stdout.decode("utf-8", errors="replace")
     result.stderr = result.stderr.decode("utf-8", errors="replace")
     return result
+
+
+def _stream_subprocess(args, **kwargs):
+    """实时转发子进程输出，同时保留 stdout 供后续解析。"""
+    timeout = kwargs.pop("timeout", None)
+    cwd = kwargs.pop("cwd", None)
+    start_time = time.time()
+    chunks = []
+
+    process = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        cwd=cwd,
+    )
+
+    stdout_fd = process.stdout.fileno()
+    try:
+        while True:
+            if timeout is not None and time.time() - start_time > timeout:
+                process.kill()
+                raise subprocess.TimeoutExpired(args, timeout)
+
+            ready, _, _ = select.select([stdout_fd], [], [], 0.5)
+            if ready:
+                raw = os.read(stdout_fd, 4096)
+                if not raw:
+                    break
+                text = raw.decode("utf-8", errors="replace")
+                chunks.append(text)
+                print(text, end="", flush=True)
+            elif process.poll() is not None:
+                rest = process.stdout.read()
+                if rest:
+                    text = rest.decode("utf-8", errors="replace")
+                    chunks.append(text)
+                    print(text, end="", flush=True)
+                break
+    finally:
+        if process.poll() is None and timeout is not None and time.time() - start_time > timeout:
+            process.kill()
+            process.wait()
+        if process.stdout:
+            process.stdout.close()
+
+    return subprocess.CompletedProcess(
+        args=args,
+        returncode=process.wait(),
+        stdout="".join(chunks),
+        stderr="",
+    )
 
 
 def scan_videos():
@@ -255,15 +308,10 @@ def transcribe_local_dir(local_dir, recursive=False):
     if recursive:
         cmd.append("--recursive")
 
-    result = _safe_subprocess(
+    result = _stream_subprocess(
         cmd,
         cwd=SKILL_DIR, timeout=7200,
     )
-
-    if result.stdout:
-        print(result.stdout)
-    if result.stderr:
-        print(result.stderr)
 
     # 解析输出文件列表
     output_files = []
@@ -438,7 +486,7 @@ def _build_domain_prompt(domains_str):
     return "".join(parts) + "\n"
 
 
-def generate_summary(filepath):
+def generate_summary(filepath, progress_label=None):
     """使用 LLM 为转录文件生成摘要、思维导图、校对版本
 
     三阶段处理：
@@ -447,6 +495,8 @@ def generate_summary(filepath):
       3. 原文校对——修复 ASR 错别字，优化可读性（替换校对占位符）
     每个阶段独立，一个失败不影响其他。
     """
+    label = progress_label or os.path.basename(filepath)
+
     if not SUMMARY_API_KEY:
         return False
     if not os.path.exists(filepath):
@@ -520,13 +570,13 @@ def generate_summary(filepath):
     # ===== 第 1 阶段：结构化摘要 =====
     summary_ph = placeholders[0] if placeholders[0] in content else old_summary_ph
     if summary_ph in content:
-        print("   📝 生成摘要...")
+        print(f"   📝 {label}: 生成摘要...")
         try:
             summary = _call_llm(
                 "你是一个视频摘要助手。请对以下转录文本生成结构化摘要，"
                 "包含：1) 核心观点 2) 主要论点 3) 关键结论。用中文回复，简洁明了。",
                 f"视频标题：{title}\n\n转录文本：\n{transcript_text}",
-                task_name="摘要生成",
+                task_name=f"摘要生成 {label}",
             )
             if summary:
                 # 用 replace 精确匹配（old_summary_ph 和 new ph 不同）
@@ -535,13 +585,13 @@ def generate_summary(filepath):
                 else:
                     content = content.replace(placeholders[0], summary.strip())
                 changed = True
-                print(f"   ✅ 摘要已写入")
+                print(f"   ✅ {label}: 摘要已写入")
         except Exception as e:
-            print(f"   ⚠️ 摘要生成失败: {e}")
+            print(f"   ⚠️ {label}: 摘要生成失败: {e}")
 
     # ===== 第 2 阶段：思维导图 =====
     if placeholders[1] in content:
-        print("   🧠 生成思维导图...")
+        print(f"   🧠 {label}: 生成思维导图...")
         try:
             mindmap = _call_llm(
                 "你是一个结构化整理助手。请根据转录文本生成一份思维导图，"
@@ -551,23 +601,25 @@ def generate_summary(filepath):
                 "要求：层次清晰、要点精炼、覆盖全文核心内容。",
                 f"视频标题：{title}\n\n转录文本：\n{transcript_text}",
                 max_tokens=SUMMARY_MAX_TOKENS,
-                task_name="思维导图生成",
+                task_name=f"思维导图生成 {label}",
             )
             if mindmap:
                 content = content.replace(placeholders[1], mindmap.strip())
                 changed = True
-                print(f"   ✅ 思维导图已写入")
+                print(f"   ✅ {label}: 思维导图已写入")
         except Exception as e:
-            print(f"   ⚠️ 思维导图生成失败: {e}")
+            print(f"   ⚠️ {label}: 思维导图生成失败: {e}")
 
     # ===== 第 3 阶段：原文校对 =====
     if placeholders[2] in content:
-        print("   🔍 AI校对转录文本...")
+        print(f"   🔍 {label}: AI校对转录文本...")
         try:
-            # 先判断是否为对话
-            is_dialogue = _detect_dialogue(transcript_text)
+            # 可选：先判断是否为对话
+            is_dialogue = False
+            if ENABLE_DIALOGUE_DETECTION:
+                is_dialogue = _detect_dialogue(transcript_text)
             if is_dialogue:
-                print("   💬 检测为对话内容，校对时将标注说话角色")
+                print(f"   💬 {label}: 检测为对话内容，校对时将标注说话角色")
 
             # 构建领域专有名词提示
             domain_terms = _build_domain_prompt(PROOFREAD_DOMAINS)
@@ -605,14 +657,14 @@ def generate_summary(filepath):
                 proofread_prompt,
                 f"视频标题：{title}\n\n原始转录文本：\n{transcript_text}",
                 max_tokens=SUMMARY_MAX_TOKENS,
-                task_name="AI校对",
+                task_name=f"AI校对 {label}",
             )
             if proofread:
                 content = content.replace(placeholders[2], proofread.strip())
                 changed = True
-                print(f"   ✅ AI校对已写入")
+                print(f"   ✅ {label}: AI校对已写入")
         except Exception as e:
-            print(f"   ⚠️ AI校对失败: {e}")
+            print(f"   ⚠️ {label}: AI校对失败: {e}")
 
     if changed:
         with open(filepath, "w", encoding="utf-8") as f:
@@ -675,23 +727,24 @@ def run_summary_only(target_path=None):
     start_time = time.time()
 
     for i, filepath in enumerate(files, 1):
-        print(f"\n📄 [{i}/{len(files)}] {os.path.basename(filepath)}")
+        progress_label = f"[{i}/{len(files)}] {os.path.basename(filepath)}"
+        print(f"\n📄 {progress_label}")
         changed = False
         try:
-            changed = generate_summary(filepath)
+            changed = generate_summary(filepath, progress_label=progress_label)
         except Exception as e:
             failed_count += 1
-            print(f"   ⚠️ AI 后处理异常: {e}")
+            print(f"   ⚠️ {progress_label}: AI 后处理异常: {e}")
             continue
 
         if changed:
             changed_count += 1
             if COOLDOWN_DELAY > 0 and i < len(files):
-                print(f"   🥶 LLM 散热等待 {COOLDOWN_DELAY} 秒...")
+                print(f"   🥶 {progress_label}: LLM 散热等待 {COOLDOWN_DELAY} 秒...")
                 time.sleep(COOLDOWN_DELAY)
         else:
             skipped_count += 1
-            print("   ⏭️  无待处理占位符，跳过")
+            print(f"   ⏭️  {progress_label}: 无待处理占位符，跳过")
 
     total_time = time.time() - start_time
     print(f"\n{'=' * 70}")
@@ -739,15 +792,17 @@ def main():
         # 生成摘要
         if SUMMARY_API_KEY and output_files:
             print(f"\n📝 生成 AI 摘要...")
-            for i, f in enumerate(output_files):
+            for i, f in enumerate(output_files, 1):
+                progress_label = f"[{i}/{len(output_files)}] {os.path.basename(f)}"
+                print(f"\n📄 {progress_label}")
                 changed = False
                 try:
-                    changed = generate_summary(f)
+                    changed = generate_summary(f, progress_label=progress_label)
                 except Exception as e:
-                    print(f"   ⚠️ 摘要生成异常: {e}")
+                    print(f"   ⚠️ {progress_label}: 摘要生成异常: {e}")
                 # LLM 散热
-                if changed and COOLDOWN_DELAY > 0 and i < len(output_files) - 1:
-                    print(f"   🥶 LLM 散热等待 {COOLDOWN_DELAY} 秒...")
+                if changed and COOLDOWN_DELAY > 0 and i < len(output_files):
+                    print(f"   🥶 {progress_label}: LLM 散热等待 {COOLDOWN_DELAY} 秒...")
                     time.sleep(COOLDOWN_DELAY)
 
         total_time = time.time() - start_time
@@ -845,14 +900,15 @@ def main():
 
             # AI摘要生成
             if enable_summary and output_file and output_file != "unknown":
+                progress_label = f"[{i}/{len(pending)}] {v['title']}"
                 changed = False
                 try:
-                    changed = generate_summary(output_file)
+                    changed = generate_summary(output_file, progress_label=progress_label)
                 except Exception as e:
-                    print(f"   ⚠️ 摘要生成异常: {e}")
+                    print(f"   ⚠️ {progress_label}: 摘要生成异常: {e}")
                 # LLM 散热
                 if changed and COOLDOWN_DELAY > 0 and i < len(pending):
-                    print(f"   🥶 LLM 散热等待 {COOLDOWN_DELAY} 秒...")
+                    print(f"   🥶 {progress_label}: LLM 散热等待 {COOLDOWN_DELAY} 秒...")
                     time.sleep(COOLDOWN_DELAY)
 
         else:

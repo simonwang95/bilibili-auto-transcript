@@ -107,9 +107,10 @@ LLM_MAX_RETRIES="2"
 LLM_RETRY_DELAY="3"
 COOLDOWN_DELAY="30"
 
-# 校对领域 + 对话检测
+# 校对领域 + 可选对话检测
 PROOFREAD_DOMAINS="finance,computer"
-# AI 校对自动检测对话/访谈，对话内容按语义区分说话角色
+ENABLE_DIALOGUE_DETECTION="false"
+# true 时 AI 校对前检测对话/访谈，对话内容按语义区分说话角色
 ```
 
 ### 脚本速查

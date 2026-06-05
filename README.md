@@ -6,7 +6,7 @@ B站视频转录 + 收藏夹扫描 + 本地文件转录。双引擎 ASR（Qwen3-
 
 - **三模式转录**：B站单视频、收藏夹批量、本地文件目录
 - **三级字幕降级**（B站）：CC 字幕 → AI 字幕 → ASR 本地转录
-- **本地字幕优先**：本地媒体在 `FORCE_ASR=false` 时优先导入同名 `.srt`
+- **本地字幕优先**：本地媒体在 `FORCE_ASR=false` 时优先导入同目录 `video.srt` 或 `video_*.srt`
 - **双引擎 ASR**：Qwen3-ASR（中文 CER ~3.8%）或 Whisper v3 Turbo（MLX 加速）
 - **LLM 后处理**：结构化摘要 + 思维导图 + AI 校对（领域术语检查）
 - **后处理中断恢复**：`--summary-only` 可为已有 Markdown 补齐摘要/导图/校对，无需重新 ASR
@@ -46,6 +46,7 @@ FAV_MEDIA_ID="your_id"                                        # B站收藏夹 ID
 ASR_ENGINE="whisper"                                          # qwen3 | whisper
 ASR_LOCAL_MODEL="/path/to/whisper-large-v3-turbo"             # 本地模型路径
 ASR_PROMPT="以下是中文课程音频，可能包含 AI、股票、摄影等专有名词。"  # Whisper 提示词
+ASR_PROGRESS_INTERVAL="30"                                    # Whisper 转录状态提示间隔（秒）
 FORCE_ASR="true"                                              # 跳过 B站字幕，直接本地转录
 SUMMARY_API_KEY="lm-studio"                                   # LLM API Key
 SUMMARY_API_URL="http://127.0.0.1:1234/v1"                    # LM Studio / Ollama
@@ -53,6 +54,7 @@ SUMMARY_MODEL="qwen3.6-27b-ud-mlx"
 LLM_MAX_RETRIES="2"                                           # LLM 临时失败重试次数
 COOLDOWN_DELAY="30"                                           # 视频间散热等待（秒）
 PROOFREAD_DOMAINS="finance,computer"                          # 校对领域（支持对话检测）
+ENABLE_DIALOGUE_DETECTION="false"                             # 是否在校对前检测对话/访谈并标注角色
 ```
 
 完整配置说明见 [docs/config.md](docs/config.md)。

@@ -11,6 +11,70 @@ Whisper 语音转录辅助脚本 v1.0
 import argparse
 import os
 import sys
+import threading
+import time
+
+
+def _format_seconds(seconds):
+    if seconds is None:
+        return "未知"
+    seconds = int(seconds)
+    return f"{seconds // 60}分{seconds % 60}秒"
+
+
+def _probe_duration(audio_path):
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                audio_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except Exception:
+        return None
+    return None
+
+
+def _start_progress_heartbeat(audio_path, interval):
+    if interval <= 0:
+        return None, None
+
+    stop_event = threading.Event()
+    duration = _probe_duration(audio_path)
+    filename = os.path.basename(audio_path)
+    start_time = time.time()
+
+    def heartbeat():
+        while not stop_event.wait(interval):
+            elapsed = time.time() - start_time
+            if duration and duration > 0:
+                ratio = elapsed / duration
+                print(
+                    f"   ⏳ Whisper 转录中: {filename} | 已用 {_format_seconds(elapsed)} | "
+                    f"音频 {_format_seconds(duration)} | {ratio:.2f}x 实时",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            else:
+                print(
+                    f"   ⏳ Whisper 转录中: {filename} | 已用 {_format_seconds(elapsed)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+    thread = threading.Thread(target=heartbeat, daemon=True)
+    thread.start()
+    return stop_event, start_time
 
 
 def main():
@@ -20,6 +84,8 @@ def main():
     parser.add_argument("--model-path", required=True, help="本地 Whisper 模型路径")
     parser.add_argument("--language", default=None, help="转录语言（如 zh, en, ja），默认自动检测")
     parser.add_argument("--prompt", default=None, help="Whisper 初始提示词，用于提供语言、术语或风格提示")
+    parser.add_argument("--progress-interval", type=float, default=None,
+                        help="转录进度提示间隔（秒），0=关闭；默认读取 ASR_PROGRESS_INTERVAL 或 30")
     args = parser.parse_args()
 
     if not os.path.exists(args.audio):
@@ -59,10 +125,19 @@ def main():
         if prompt:
             transcribe_kwargs["initial_prompt"] = prompt
 
-        result = mlx_whisper.transcribe(
-            args.audio,
-            **transcribe_kwargs,
-        )
+        progress_interval = args.progress_interval
+        if progress_interval is None:
+            progress_interval = float(os.environ.get("ASR_PROGRESS_INTERVAL", "30"))
+        stop_event, start_time = _start_progress_heartbeat(args.audio, progress_interval)
+        try:
+            result = mlx_whisper.transcribe(
+                args.audio,
+                **transcribe_kwargs,
+            )
+        finally:
+            if stop_event:
+                stop_event.set()
+
         transcript = result.get("text", "").strip()
 
         if not transcript:
@@ -77,7 +152,11 @@ def main():
             f.write(source + "\n")
             f.write(transcript + "\n")
 
-        print(f"   ✅ 转录完成", file=sys.stderr)
+        elapsed = time.time() - start_time if start_time else None
+        if elapsed:
+            print(f"   ✅ 转录完成，用时 {_format_seconds(elapsed)}", file=sys.stderr)
+        else:
+            print(f"   ✅ 转录完成", file=sys.stderr)
         print(f"   📄 来源: {source}", file=sys.stderr)
 
     except Exception as e:

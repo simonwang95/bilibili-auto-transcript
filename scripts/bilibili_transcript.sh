@@ -193,7 +193,7 @@ get_cookie_args() {
 }
 
 to_safe_name() {
-    python3 -c "import sys, re; s=sys.stdin.read().strip(); s=re.sub(r'[\\\\/:*?\"<>|]', '', s); s=re.sub(r'[\s\W]+', '-', s); s=re.sub(r'-+', '-', s).strip('-'); print(s[:60] or 'untitled')"
+    python3 -c "import sys, re, unicodedata; s=unicodedata.normalize('NFC', sys.stdin.read().strip()); s=re.sub(r'[\\\\/:*?\"<>|]', '', s); s=re.sub(r'[\s\W]+', '-', s); s=re.sub(r'-+', '-', s).strip('-'); print(s[:60] or 'untitled')"
 }
 
 to_simplified() {
@@ -215,10 +215,63 @@ extract_srt_text() {
     ' "$srt_file"
 }
 
+normalize_existing_path() {
+    local path="$1"
+    if [ -e "$path" ]; then
+        echo "$path"
+        return 0
+    fi
+    if [[ "$path" != /* ]] && [ -e "/$path" ]; then
+        echo "/$path"
+        return 0
+    fi
+    echo "$path"
+}
+
+find_local_srt() {
+    local media_path="$1"
+    local media_dir media_file media_base media_safe exact candidate candidate_name candidate_base candidate_media_base candidate_safe
+
+    media_dir=$(dirname "$media_path")
+    media_file=$(basename "$media_path")
+    media_base="${media_file%.*}"
+    media_safe=$(printf "%s" "$media_base" | to_safe_name)
+
+    exact="${media_dir}/${media_base}.srt"
+    if [ -f "$exact" ] && [ -s "$exact" ]; then
+        echo "$exact"
+        return 0
+    fi
+
+    while IFS= read -r candidate; do
+        candidate_name=$(basename "$candidate")
+        candidate_base="${candidate_name%.srt}"
+        case "$candidate_base" in
+            "$media_base"_*)
+                if [ -s "$candidate" ]; then
+                    echo "$candidate"
+                    return 0
+                fi
+                ;;
+        esac
+        candidate_media_base="${candidate_base%_*}"
+        if [ "$candidate_media_base" != "$candidate_base" ]; then
+            candidate_safe=$(printf "%s" "$candidate_media_base" | to_safe_name)
+            if [ "$candidate_safe" = "$media_safe" ] && [ -s "$candidate" ]; then
+                echo "$candidate"
+                return 0
+            fi
+        fi
+    done < <(find "$media_dir" -maxdepth 1 -type f ! -name ".*" -iname "*.srt" 2>/dev/null | sort)
+
+    return 1
+}
+
 run_asr_transcribe() {
     local audio_file="$1"
     local output_file="$2"
     local engine="${ASR_ENGINE:-qwen3}"
+    audio_file=$(normalize_existing_path "$audio_file")
 
     export HF_HOME="$MODEL_CACHE_DIR"
 
@@ -257,15 +310,19 @@ run_asr_transcribe() {
             prompt_arg=(--prompt "$ASR_PROMPT")
             echo "   💡 Whisper 提示: ${ASR_PROMPT:0:80}"
         fi
+        local progress_arg=()
+        if [ -n "${ASR_PROGRESS_INTERVAL:-}" ]; then
+            progress_arg=(--progress-interval "$ASR_PROGRESS_INTERVAL")
+        fi
 
         if [ "$transcribe_py" = "conda" ]; then
             conda run -n "$CONDA_ENV" python3 "$wh_script" \
                 --audio "$audio_file" --output-file "$output_file" \
-                --model-path "$model_path" "${lang_arg[@]}" "${prompt_arg[@]}"
+                --model-path "$model_path" "${lang_arg[@]}" "${prompt_arg[@]}" "${progress_arg[@]}"
         else
             "$transcribe_py" "$wh_script" \
                 --audio "$audio_file" --output-file "$output_file" \
-                --model-path "$model_path" "${lang_arg[@]}" "${prompt_arg[@]}"
+                --model-path "$model_path" "${lang_arg[@]}" "${prompt_arg[@]}" "${progress_arg[@]}"
         fi
 
     else
@@ -514,6 +571,7 @@ transcribe_local_file() {
     local file_path="$1"
     local file_index="${2:-}"
     local file_total="${3:-}"
+    file_path=$(normalize_existing_path "$file_path")
     local filename
     filename=$(basename "$file_path")
     local file_label="$filename"
@@ -546,12 +604,7 @@ transcribe_local_file() {
 
     # FORCE_ASR=false 时，优先使用同目录同名 .srt 字幕，避免不必要的 ASR。
     local subtitle_file=""
-    for candidate in "${file_path%.*}.srt" "${file_path%.*}_中文（中国）.srt"; do
-        if [ -f "$candidate" ] && [ -s "$candidate" ]; then
-            subtitle_file="$candidate"
-            break
-        fi
-    done
+    subtitle_file=$(find_local_srt "$file_path" || true)
 
     if [ "${FORCE_ASR:-false}" != "true" ] && [ -n "$subtitle_file" ]; then
         echo "   📝 $file_label: 发现同名 SRT 字幕，优先使用: $(basename "$subtitle_file")"
@@ -708,6 +761,7 @@ EOF
 
 # 模式：本地目录批量转录
 if [ -n "$LOCAL_DIR" ]; then
+    LOCAL_DIR=$(normalize_existing_path "$LOCAL_DIR")
     if [ ! -d "$LOCAL_DIR" ]; then
         echo "❌ 目录不存在: $LOCAL_DIR"
         exit 1

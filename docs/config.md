@@ -71,6 +71,7 @@ pip install mlx-whisper
 | `FORCE_ASR_CPU` | `"false"` | Qwen3-ASR 专用。Apple Silicon 上 MPS 可能内存超限（47GB），设为 `true` 强制 CPU 推理 |
 | `ASR_LANGUAGE` | `""` | Whisper 转录语言。默认空字符串=自动检测，非中文内容保留原语言。纯中文视频可设为 `zh` 强制提高准确率（但会丢失英文等非中文内容） |
 | `ASR_PROMPT` | `""` | Whisper 初始提示词。可填入课程领域、专有名词、缩写等，帮助转写稳定；仅 `ASR_ENGINE=whisper` 时生效 |
+| `ASR_PROGRESS_INTERVAL` | `"30"` | Whisper 转录状态提示间隔（秒）。长音频转写时会定时打印已耗时、音频时长和实时倍率；设为 `0` 关闭 |
 
 `ASR_ENGINE=whisper` 时自动忽略 `FORCE_ASR_CPU`（Whisper 走 MLX 不走 PyTorch MPS）。
 
@@ -86,12 +87,13 @@ pip install mlx-whisper
 | `LLM_MAX_RETRIES` | `"2"` | LLM 请求失败后的最大重试次数。默认最多请求 3 次（首次 + 2 次重试） |
 | `LLM_RETRY_DELAY` | `"3"` | LLM 重试基础等待秒数，按 1x / 2x / 4x 指数退避 |
 | `PROOFREAD_DOMAINS` | `""` | 校对时关注的专有领域，逗号分隔。可选：finance / computer / medical / legal / engineering。留空默认启用金融+计算机 |
+| `ENABLE_DIALOGUE_DETECTION` | `"false"` | 是否在 AI 校对前额外调用一次 LLM 判断对话/访谈/多人讨论。设为 `true` 时，对话内容会尝试标注主持人/嘉宾/说话人角色 |
 
 设置 `SUMMARY_API_KEY` 后，每个转录完成会自动执行：
 
 1. **结构化摘要** — 核心观点 + 主要论点 + 关键结论
 2. **思维导图** — 缩进 Markdown 列表格式
-3. **对话检测 + AI 校对** — 先判断转录是否为对话/访谈类型。若是，校对时自动根据语义区分说话角色（标注为「主持人：」「嘉宾：」或「说话人A：」「说话人B：」）；非对话则执行常规校对（同音错别字 + 断句 + 标点 + 领域术语检查）
+3. **AI 校对** — 默认执行常规校对（同音错别字 + 断句 + 标点 + 领域术语检查）。若 `ENABLE_DIALOGUE_DETECTION=true`，会先判断转录是否为对话/访谈类型；检测为对话时自动根据语义区分说话角色（标注为「主持人：」「嘉宾：」或「说话人A：」「说话人B：」）
 
 三个阶段独立运行，一个失败不影响其他。LLM 请求会对超时、连接异常、HTTP 408/409/425/429、5xx、空响应或异常响应做重试；HTTP 400/401/403/404 等配置错误不重试，直接失败。
 
@@ -120,7 +122,7 @@ SUMMARY_API_KEY="lm-studio"
 python scripts/batch_transcribe.py
 ```
 
-流程：扫描收藏夹 → avid/bvid 双重去重（文本记录+磁盘文件）→ 三级降级转录（CC→AI→ASR）→ 对话检测（若为对话则标注角色）→ LLM 摘要/导图/校对 → CSV 报告。结果按当前年月保存到 `bilibili/YYYY-MM/`。
+流程：扫描收藏夹 → avid/bvid 双重去重（文本记录+磁盘文件）→ 三级降级转录（CC→AI→ASR）→ LLM 摘要/导图/校对（可选对话检测并标注角色）→ CSV 报告。结果按当前年月保存到 `bilibili/YYYY-MM/`。
 
 ### 场景 B：本地文件目录
 
@@ -137,7 +139,7 @@ python scripts/batch_transcribe.py --local-dir "/path/to/videos/"
 python scripts/batch_transcribe.py --local-dir "/path/to/videos/" --recursive
 ```
 
-流程：扫描目录媒体文件 → 若 `FORCE_ASR=false` 且存在同目录同名 `.srt`，优先导入字幕 → 否则 ffmpeg 提取/转换音频 → ASR 转录 → LLM 摘要/导图/校对。默认只扫描目录第一层；加 `--recursive` 后递归扫描子目录。结果保存到 `bilibili/local/`。不涉及 B站 API，不走去重。
+流程：扫描目录媒体文件 → 若 `FORCE_ASR=false` 且存在同目录同名 `.srt`，优先导入字幕（支持 `video.srt` 和 `video_*.srt` 语言后缀）→ 否则 ffmpeg 提取/转换音频 → ASR 转录 → LLM 摘要/导图/校对。默认只扫描目录第一层；加 `--recursive` 后递归扫描子目录。结果保存到 `bilibili/local/`。不涉及 B站 API，不走去重。
 
 如果进程在 ASR 完成后、LLM 后处理完成前中断，不需要删除已生成的 Markdown。直接运行：
 

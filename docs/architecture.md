@@ -87,7 +87,7 @@ ffmpeg 转 16kHz 单声道 WAV（统一格式，兼容性最佳）
 
 ## 三、本地文件转录模式（v5.0 新增）
 
-当传入 `--local-dir <目录>` 时，脚本跳过 B站 API。若 `FORCE_ASR=false` 且媒体文件旁存在同目录同名 `.srt` 字幕，则优先导入字幕；否则进入 ASR 语音转文字流程。结果保存到 `OUTPUT_DIR/local/`。
+当传入 `--local-dir <目录>` 时，脚本跳过 B站 API。若 `FORCE_ASR=false` 且媒体文件旁存在同目录同名 `.srt` 字幕，则优先导入字幕；支持精确同名 `video.srt` 和语言后缀 `video_*.srt`。否则进入 ASR 语音转文字流程。结果保存到 `OUTPUT_DIR/local/`。
 
 ### 与在线模式的区别
 
