@@ -45,6 +45,8 @@ FORCE_ASR="true"                                              # 跳过 B站字�
 SUMMARY_API_KEY="lm-studio"                                   # LLM API Key
 SUMMARY_API_URL="http://127.0.0.1:1234/v1"                    # LM Studio / Ollama
 SUMMARY_MODEL="qwen3.6-27b-ud-mlx"
+COOLDOWN_DELAY="30"                                           # 视频间散热等待（秒）
+PROOFREAD_DOMAINS="finance,computer"                          # 校对领域（支持对话检测）
 ```
 
 完整配置说明见 [docs/config.md](docs/config.md)。

@@ -72,7 +72,7 @@ ffmpeg -version    # 必需
 
 ### 场景 A：B站收藏夹转录
 
-三级降级：CC 字幕 → AI 字幕 → Qwen3-ASR。结果按 `YYYY-MM/` 分目录。
+三级降级：CC 字幕 → AI 字幕 → ASR 本地转录。结果按当前 `YYYY-MM/` 分目录，文件名保留视频发布时间。
 
 ```bash
 # 编辑 env.local: 设置 FAV_MEDIA_ID、LLM 配置
@@ -103,9 +103,11 @@ SUMMARY_API_URL="http://127.0.0.1:1234/v1"
 SUMMARY_MODEL="qwen3.6-27b-ud-mlx"
 SUMMARY_MAX_TOKENS="16000"
 LLM_TIMEOUT="600"
+COOLDOWN_DELAY="30"
 
-# 校对领域
-PROOFREAD_DOMAINS="finance,computer,medical,legal,engineering"
+# 校对领域 + 对话检测
+PROOFREAD_DOMAINS="finance,computer"
+# AI 校对自动检测对话/访谈，对话内容按语义区分说话角色
 ```
 
 ### 脚本速查

@@ -302,6 +302,29 @@ def _call_llm(system_prompt, user_prompt, max_tokens=None):
         raise ValueError(f"Unexpected response: {resp_data}")
 
 
+def _detect_dialogue(text, sample_chars=3000):
+    """快速判断转录文本是否为对话/访谈/多人讨论。
+
+    取文本前 sample_chars 字符，用 LLM 判断是否包含多人对话特征：
+    问答交替、观点交锋、称呼切换、语气变化等。
+    """
+    sample = text[:sample_chars]
+    try:
+        result = _call_llm(
+            "你是一个文本分析助手。请判断以下转录文本是否属于对话/访谈/多人讨论类型。"
+            "只回复「是」或「否」。\n"
+            "判断依据：是否出现明显的多人轮流发言特征，如问答交替、观点交锋、"
+            "不同语气或立场切换、明显的说话人切换等。",
+            f"转录文本片段：\n{sample}",
+            max_tokens=8,
+        )
+        if result and "是" in result:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _build_domain_prompt(domains_str):
     """根据 PROOFREAD_DOMAINS 配置生成领域专有名词校对提示。
 
@@ -486,19 +509,45 @@ def generate_summary(filepath):
     if placeholders[2] in content:
         print("   🔍 AI校对转录文本...")
         try:
+            # 先判断是否为对话
+            is_dialogue = _detect_dialogue(transcript_text)
+            if is_dialogue:
+                print("   💬 检测为对话内容，校对时将标注说话角色")
+
             # 构建领域专有名词提示
             domain_terms = _build_domain_prompt(PROOFREAD_DOMAINS)
 
+            if is_dialogue:
+                proofread_prompt = (
+                    "你是一个文字校对员。以下是语音转文字的对话转录文本。\n"
+                    "规则：\n"
+                    "1) 修正明显的同音错别字和语音识别错误\n"
+                    "2) 修复断句问题（合并不合理的断句、拆分超长句）\n"
+                    "3) 去除口语填充词（如过多的「嗯」「啊」「就是说」）\n"
+                    "4) 修正标点符号，使文本更易读\n"
+                    "5) 严禁增删实质性内容，严禁改变原意和说话风格\n"
+                    "6) 根据语义判断说话人切换的位置，为每个发言段落标注角色。\n"
+                    "   格式使用「角色名：」或「说话人：」前缀（如「主持人：」「嘉宾：」）。\n"
+                    "   如果无法确定具体角色名，使用「说话人A：」「说话人B：」区分。\n"
+                    "   连续同一角色的发言合并为一段，角色切换时另起新段。\n"
+                    + domain_terms +
+                    "7) 输出完整的校对后文本（含角色标注）"
+                )
+            else:
+                proofread_prompt = (
+                    "你是一个文字校对员。请校对并修正以下语音转文字的转录文本。\n"
+                    "规则：\n"
+                    "1) 修正明显的同音错别字和语音识别错误\n"
+                    "2) 修复断句问题（合并不合理的断句、拆分超长句）\n"
+                    "3) 去除口语填充词（如过多的「嗯」「啊」「就是说」）\n"
+                    "4) 修正标点符号，使文本更易读\n"
+                    "5) 严禁增删实质性内容，严禁改变原意和说话风格\n"
+                    + domain_terms +
+                    "6) 输出完整的校对后文本"
+                )
+
             proofread = _call_llm(
-                "你是一个文字校对员。请校对并修正以下语音转文字的转录文本。\n"
-                "规则：\n"
-                "1) 修正明显的同音错别字和语音识别错误\n"
-                "2) 修复断句问题（合并不合理的断句、拆分超长句）\n"
-                "3) 去除口语填充词（如过多的「嗯」「啊」「就是说」）\n"
-                "4) 修正标点符号，使文本更易读\n"
-                "5) 严禁增删实质性内容，严禁改变原意和说话风格\n"
-                + domain_terms +
-                "7) 输出完整的校对后文本",
+                proofread_prompt,
                 f"视频标题：{title}\n\n原始转录文本：\n{transcript_text}",
                 max_tokens=SUMMARY_MAX_TOKENS,
             )

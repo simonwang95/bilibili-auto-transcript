@@ -31,7 +31,7 @@ ANOTHER_KEY="another value"
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `OUTPUT_DIR` | `"$HOME/workspace/knowledge/bilibili"` | 输出目录。B站模式按 `YYYY-MM/` 分子目录，本地文件保存到 `local/` 子目录 |
+| `OUTPUT_DIR` | `"$HOME/workspace/knowledge/bilibili"` | 输出目录。B站模式按当前年月（`YYYY-MM/`）分子目录，本地文件保存到 `local/` 子目录 |
 | `CACHE_DIR` | `"./cache/audio"` | 下载音频的临时缓存，脚本退出时自动清理 |
 | `MODEL_CACHE_DIR` | `"./models"` | Qwen3-ASR 从 HuggingFace 下载时的缓存目录。Whisper 引擎不使用此配置 |
 | `STATE_DIR` | `"$HOME/.openclaw/workspace/.auto-transcript-state"` | 已处理记录与 CSV 报告 |
@@ -69,6 +69,7 @@ pip install mlx-whisper
 | `ASR_LOCAL_MODEL` | `""` | 本地模型路径。相对路径以项目根目录为基准。Whisper 示例：`"/Users/wyq/.lmstudio/models/mlx-community/whisper-large-v3-turbo"` |
 | `FORCE_ASR` | `"false"` | 设为 `true` 跳过 B站 CC/AI 字幕检测，强制用本地 ASR 转录 |
 | `FORCE_ASR_CPU` | `"false"` | Qwen3-ASR 专用。Apple Silicon 上 MPS 可能内存超限（47GB），设为 `true` 强制 CPU 推理 |
+| `ASR_LANGUAGE` | `""` | Whisper 转录语言。默认空字符串=自动检测，非中文内容保留原语言。纯中文视频可设为 `zh` 强制提高准确率（但会丢失英文等非中文内容） |
 
 `ASR_ENGINE=whisper` 时自动忽略 `FORCE_ASR_CPU`（Whisper 走 MLX 不走 PyTorch MPS）。
 
@@ -87,7 +88,7 @@ pip install mlx-whisper
 
 1. **结构化摘要** — 核心观点 + 主要论点 + 关键结论
 2. **思维导图** — 缩进 Markdown 列表格式
-3. **AI 校对** — 修正同音错别字 + 断句优化 + 标点修正 + 领域术语检查
+3. **对话检测 + AI 校对** — 先判断转录是否为对话/访谈类型。若是，校对时自动根据语义区分说话角色（标注为「主持人：」「嘉宾：」或「说话人A：」「说话人B：」）；非对话则执行常规校对（同音错别字 + 断句 + 标点 + 领域术语检查）
 
 三个阶段独立运行，一个失败不影响其他。
 
@@ -116,7 +117,7 @@ SUMMARY_API_KEY="lm-studio"
 python scripts/batch_transcribe.py
 ```
 
-流程：扫描收藏夹 → avid 去重 → 三级降级转录（CC→AI→ASR）→ LLM 摘要/导图/校对 → CSV 报告。结果保存到 `bilibili/2026-06/`。
+流程：扫描收藏夹 → avid/bvid 双重去重（文本记录+磁盘文件）→ 三级降级转录（CC→AI→ASR）→ 对话检测（若为对话则标注角色）→ LLM 摘要/导图/校对 → CSV 报告。结果按当前年月保存到 `bilibili/YYYY-MM/`。
 
 ### 场景 B：本地文件目录
 

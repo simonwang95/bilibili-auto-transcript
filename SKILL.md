@@ -1,7 +1,7 @@
 ---
 name: bilibili-auto-transcript
-version: "5.1.0"
-description: "B站视频转录+收藏夹扫描+本地文件转录。双引擎ASR（Qwen3-ASR / Whisper MLX），三级降级（CC→AI→ASR），LLM摘要+思维导图+校对。"
+version: "5.2.0"
+description: "B站视频转录+收藏夹扫描+本地文件转录。双引擎ASR（Qwen3/Whisper MLX），三级降级（CC→AI→ASR），LLM摘要+导图+校对（对话角色标注），EPUB导出。"
 homepage: https://github.com/simonwang95/bilibili-auto-transcript
 metadata:
   {
@@ -65,7 +65,7 @@ python scripts/batch_transcribe.py
 **设置 `SUMMARY_API_KEY` 后自动执行三阶段 LLM 后处理：**
 1. **结构化摘要** — 核心观点 + 主要论点 + 关键结论
 2. **思维导图** — 缩进 Markdown 列表格式
-3. **AI 校对** — 修正 ASR 同音错别字 + 断句优化 + 领域术语检查（金融/计算机/医学/法律/工程）
+3. **AI 校对** — 先检测转录是否为对话。若为对话则按语义区分说话角色（「主持人：」「嘉宾：」等）；非对话则执行常规校对（修正 ASR 同音错别字 + 断句优化 + 领域术语检查）
 
 ---
 

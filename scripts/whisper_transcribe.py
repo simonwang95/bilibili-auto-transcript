@@ -18,6 +18,7 @@ def main():
     parser.add_argument("--audio", required=True, help="音频文件路径")
     parser.add_argument("--output-file", required=True, help="输出文件路径（第一行=来源，后续=文本）")
     parser.add_argument("--model-path", required=True, help="本地 Whisper 模型路径")
+    parser.add_argument("--language", default=None, help="转录语言（如 zh, en, ja），默认自动检测")
     args = parser.parse_args()
 
     if not os.path.exists(args.audio):
@@ -27,6 +28,11 @@ def main():
     if not os.path.exists(args.model_path):
         print(f"错误: 模型路径不存在: {args.model_path}", file=sys.stderr)
         sys.exit(1)
+
+    # === 语言配置 ===
+    language = args.language or os.environ.get("ASR_LANGUAGE", None)
+    if language:
+        print(f"   🌐 指定语言: {language}", file=sys.stderr)
 
     model_name = os.path.basename(args.model_path.rstrip("/"))
     print(f"🎤 使用本地 Whisper 模型: {model_name}", file=sys.stderr)
@@ -43,9 +49,13 @@ def main():
         print(f"   ✅ 模型加载完成", file=sys.stderr)
         print(f"   🎤 正在转录...", file=sys.stderr)
 
+        transcribe_kwargs = {"path_or_hf_repo": args.model_path}
+        if language:
+            transcribe_kwargs["language"] = language
+
         result = mlx_whisper.transcribe(
             args.audio,
-            path_or_hf_repo=args.model_path,
+            **transcribe_kwargs,
         )
         transcript = result.get("text", "").strip()
 

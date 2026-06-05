@@ -178,7 +178,7 @@ python scripts/batch_transcribe.py --local-dir /path/to/videos/
 
 1. **结构化摘要** — 核心观点 + 主要论点 + 关键结论
 2. **思维导图** — 缩进 Markdown 列表
-3. **AI 校对** — 错别字 + 断句 + 标点 + 领域术语（`PROOFREAD_DOMAINS` 控制，默认金融+计算机）
+3. **对话检测 + AI 校对** — 先调用 `_detect_dialogue()` 取文本前 3000 字符判断是否为对话/访谈/多人讨论。若检测为对话，校对 prompt 会额外要求根据语义区分说话角色，输出格式如「主持人：」「嘉宾：」或「说话人A：」「说话人B：」。非对话则执行常规校对（错别字 + 断句 + 标点 + 领域术语）
 
 三阶段独立，一个失败不影响其他。LLM 调用通过 `_call_llm()` 统一处理，超时由 `LLM_TIMEOUT` 控制。
 

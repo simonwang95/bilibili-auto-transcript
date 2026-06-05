@@ -229,10 +229,21 @@ run_asr_transcribe() {
         fi
 
         echo "   🎤 Whisper (MLX): $model_path"
+
+        local lang_arg=()
+        if [ -n "${ASR_LANGUAGE:-}" ]; then
+            lang_arg=(--language "$ASR_LANGUAGE")
+            echo "   🌐 语言: $ASR_LANGUAGE"
+        fi
+
         if [ "$transcribe_py" = "conda" ]; then
-            conda run -n "$CONDA_ENV" python3 "$wh_script" --audio "$audio_file" --output-file "$output_file" --model-path "$model_path"
+            conda run -n "$CONDA_ENV" python3 "$wh_script" \
+                --audio "$audio_file" --output-file "$output_file" \
+                --model-path "$model_path" "${lang_arg[@]}"
         else
-            "$transcribe_py" "$wh_script" --audio "$audio_file" --output-file "$output_file" --model-path "$model_path"
+            "$transcribe_py" "$wh_script" \
+                --audio "$audio_file" --output-file "$output_file" \
+                --model-path "$model_path" "${lang_arg[@]}"
         fi
 
     else
@@ -459,14 +470,10 @@ transcribe_bilibili_url() {
     # 繁体转简体
     TRANSCRIPT_TEXT_SIMPLIFIED=$(echo "$TRANSCRIPT_TEXT" | to_simplified)
 
-    # 按发布年月组织输出目录（YYYY-MM 格式）
-    local PUB_YEAR; PUB_YEAR=$(echo "$UPLOAD_DATE_FORMATTED" | cut -d'-' -f1)
-    local PUB_MONTH; PUB_MONTH=$(echo "$UPLOAD_DATE_FORMATTED" | cut -d'-' -f2)
-    local final_outdir="$OUTPUT_DIR"
-    if [ -n "$PUB_YEAR" ] && [ "$PUB_YEAR" != "未知时间" ]; then
-        final_outdir="${OUTPUT_DIR}/${PUB_YEAR}-${PUB_MONTH}"
-        mkdir -p "$final_outdir"
-    fi
+    # 按当前时间组织输出目录（YYYY-MM 格式），文件名保留视频发布时间
+    local TODAY; TODAY=$(date '+%Y-%m')
+    local final_outdir="${OUTPUT_DIR}/${TODAY}"
+    mkdir -p "$final_outdir"
 
     local SAFE_TITLE;  SAFE_TITLE=$(echo "$TITLE" | to_safe_name)
     local AUTHOR_SAFE; AUTHOR_SAFE=$(echo "$AUTHOR" | to_safe_name)
