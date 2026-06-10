@@ -237,7 +237,7 @@ batch_transcribe.py (v3.0)
 - `bilibili_transcript.sh`：单视频 URL 或本地目录转录
 - `qwen3_transcribe.py` / `whisper_transcribe.py`：纯语音转文字
 - `organize_categories.py`：将日期目录下的文件按内容分类整理
-- `build_epub.py`：将分类目录打包为 EPUB 电子书
+- `build_epub.py`：递归读取 Markdown 并打包为 EPUB 电子书
 
 ---
 
@@ -285,7 +285,7 @@ python scripts/organize_categories.py --category 技术 /path/to/file.md
 **版本**: v2.0  
 **语言**: Python 3  
 **依赖**: 无（纯标准库，无需 ebooklib / markdown 等外部包）  
-**职责**: 合并所有分类目录下的 .md 文件为一部 EPUB，分类为一级目录，视频标题为二级目录
+**职责**: 递归合并指定目录下的 .md 文件为一部 EPUB，保留文件夹嵌套目录，视频标题为文章章节
 
 ### 调用方式
 
@@ -293,7 +293,7 @@ python scripts/organize_categories.py --category 技术 /path/to/file.md
 # 合并所有分类生成一本 EPUB
 python scripts/build_epub.py
 
-# 指定分类根目录（读取该目录下的分类子目录）
+# 指定输入根目录（递归读取所有子目录）
 python scripts/build_epub.py --input-dir /path/to/category-root
 
 # 指定输出目录
@@ -318,6 +318,8 @@ B站视频转录合集
 └── 生成日期                      ← 末尾页
 ```
 
+`--input-dir` 会递归遍历给定路径，并在 EPUB 目录中保留文件夹层级；例如 `课程/第一章/foo.md` 会显示为 `课程 → 第一章 → foo`。
+
 ### Markdown 解析
 
 纯 Python 标准库实现的逐行解析器，核心特性：
@@ -331,7 +333,8 @@ B站视频转录合集
 
 - **剔除完整原文**：识别 `<details>` 折叠块或 `## 完整原文` 标题并移除，EPUB 只保留摘要/导图/校对
 - **分类入口页**：每个分类一个导航页，列出该分类下所有文章链接
-- **输入目录**：默认读取 `OUTPUT_DIR` 下的分类目录；`--input-dir` 可改为读取指定分类根目录
+- **输入目录**：默认读取 `OUTPUT_DIR`；`--input-dir` 可改为指定根目录。脚本会递归读取所有 `.md` 文件，并在 EPUB 目录中保留文件夹嵌套关系
+- **自然排序**：目录和文件按数字自然排序，`1, 2, 9, 10, 11` 不会排成 `1, 10, 11, 2`
 - **末尾页**：生成日期 + 署名
 - **文件名**：`bilibili-all-YYYY-MM-DD.epub`，日期自动取当天
 - **零依赖**：直接生成 EPUB 3.0 标准的 XML/ZIP 包，兼容 iBooks / Kindle / 各类阅读器

@@ -126,7 +126,7 @@ ENABLE_DIALOGUE_DETECTION="false"
 | 分类整理文件 | `python scripts/organize_categories.py` |
 | 预览分类 | `python scripts/organize_categories.py --dry-run` |
 | 导出 EPUB（合并） | `python scripts/build_epub.py` |
-| 导出指定目录 EPUB | `python scripts/build_epub.py --input-dir <分类根目录>` |
+| 导出指定目录 EPUB | `python scripts/build_epub.py --input-dir <根目录>` |
 
 ## 外部依赖
 

@@ -166,4 +166,4 @@ python scripts/batch_transcribe.py --summary-only
 
 ## 优先级规则
 
-命令行参数 > env.local > 脚本默认值。例如 `--output-dir /tmp/out` 覆盖 `env.local` 中的 `OUTPUT_DIR`；`build_epub.py --input-dir /path/to/root` 会覆盖 EPUB 读取的分类根目录。
+命令行参数 > env.local > 脚本默认值。例如 `--output-dir /tmp/out` 覆盖 `env.local` 中的 `OUTPUT_DIR`；`build_epub.py --input-dir /path/to/root` 会覆盖 EPUB 读取的根目录，并递归读取其中的 Markdown。
